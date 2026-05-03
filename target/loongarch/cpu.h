@@ -536,6 +536,12 @@ struct LoongArchCPUClass {
 #define MMU_KERNEL_IDX   MMU_PLV_KERNEL
 #define MMU_USER_IDX     MMU_PLV_USER
 #define MMU_DA_IDX       4
+/* LVZ: Guest mode MMU indices for two-level address translation.
+ * When PVM=1, guest virtual addresses go through guest TLB first
+ * (GVA->GPA), then through root TLB (GPA->HPA). */
+#define MMU_GUEST_PLV0   5
+#define MMU_GUEST_PLV3   6
+#define MMU_IDX_NUM      7
 
 static inline bool is_la64(CPULoongArchState *env)
 {

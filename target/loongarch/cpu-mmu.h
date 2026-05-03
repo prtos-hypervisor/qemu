@@ -100,4 +100,9 @@ void get_dir_base_width(CPULoongArchState *env, uint64_t *dir_base,
 hwaddr loongarch_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 uint64_t loongarch_palen_mask(CPULoongArchState *env);
 
+
+/* LVZ: Two-level address translation for guest mode */
+TLBRet loongarch_lvz_translate(CPULoongArchState *env, vaddr addr,
+                                MMUAccessType access_type, int mmu_idx,
+                                hwaddr *phys_addr);
 #endif  /* LOONGARCH_CPU_MMU_H */

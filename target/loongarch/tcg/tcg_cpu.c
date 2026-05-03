@@ -88,6 +88,8 @@ void loongarch_lvz_vm_exit(CPULoongArchState *env)
 {
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 0);
     env->in_guest_mode = false;
+    /* Flush TLB to switch from guest MMU indices back to host */
+    tlb_flush(env_cpu(env));
 }
 
 /*
@@ -98,6 +100,8 @@ void loongarch_lvz_vm_entry(CPULoongArchState *env)
 {
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 1);
     env->in_guest_mode = true;
+    /* Flush TLB to switch from host MMU indices to guest */
+    tlb_flush(env_cpu(env));
 }
 
 static void loongarch_cpu_do_interrupt(CPUState *cs)
@@ -186,6 +190,91 @@ static void loongarch_cpu_do_interrupt(CPUState *cs)
      * in CSR_GSTAT remains set for the trap handler to detect.
      */
     if (env->in_guest_mode && cause >= 0) {
+        /*
+         * LVZ Exception Delegation: Check if the guest can handle this
+         * exception itself based on GCFG configuration.
+         *
+         * GCFG.TOE (bit 8): Trap On Exception - when set, synchronous
+         *   exceptions (syscall, breakpoint, page faults) cause VM exit.
+         *   When clear, they are delivered directly to the guest.
+         * GCFG.TIT (bit 9): Trap on Timer Interrupt - when set, timer
+         *   interrupts cause VM exit.
+         *
+         * Exceptions that ALWAYS cause VM exit (cannot be delegated):
+         *   GSPR, HVC, GCM - these are virtualization-specific.
+         */
+        bool delegate_to_guest = false;
+        uint64_t gcfg = env->CSR_GCFG;
+
+        switch (cs->exception_index) {
+        case EXCCODE_SYS:
+        case EXCCODE_BRK:
+        case EXCCODE_INE:
+        case EXCCODE_FPD:
+        case EXCCODE_FPE:
+        case EXCCODE_PIL:
+        case EXCCODE_PIS:
+        case EXCCODE_PIF:
+        case EXCCODE_PME:
+        case EXCCODE_PNR:
+        case EXCCODE_PNX:
+        case EXCCODE_PPI:
+        case EXCCODE_IPE:
+        case EXCCODE_ALE:
+            /* Delegate to guest if GCFG.TOE is clear */
+            if (!(gcfg & (1ULL << 8))) {
+                delegate_to_guest = true;
+            }
+            break;
+        case EXCCODE_INT:
+            /* Delegate timer interrupt if GCFG.TIT is clear */
+            if (!(gcfg & (1ULL << 9))) {
+                delegate_to_guest = true;
+            }
+            break;
+        default:
+            /* GSPR, HVC, GCM always cause VM exit */
+            break;
+        }
+
+        if (delegate_to_guest) {
+            /* Inject exception directly into guest:
+             * Save guest state to guest CSRs and jump to guest EENTRY */
+            uint64_t guest_eentry = env->guest.CSR_EENTRY;
+            if (guest_eentry) {
+                /* Save current guest PC and PLV/IE to guest PRMD/ERA */
+                env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
+                    CSR_PRMD, PPLV,
+                    FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
+                env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
+                    CSR_PRMD, PIE,
+                    FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
+                env->guest.CSR_ERA = env->pc;
+
+                /* Set guest exception info */
+                env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT,
+                    CSR_ESTAT, ECODE, EXCODE_MCODE(cs->exception_index));
+                env->guest.CSR_BADV = env->CSR_BADV;
+
+                /* Update guest CRMD: PLV=0, IE=0 */
+                env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                    CSR_CRMD, PLV, 0);
+                env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                    CSR_CRMD, IE, 0);
+
+                /* Jump to guest exception handler */
+                uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
+                uint32_t gvec_size = gvs ? (1 << gvs) * 4 : 0;
+                env->pc = guest_eentry +
+                    EXCODE_MCODE(cs->exception_index) * gvec_size;
+
+                /* Stay in guest mode */
+                cs->exception_index = -1;
+                return;
+            }
+        }
+
+        /* Not delegated: VM Exit to host hypervisor */
         env->in_guest_mode = false;
     }
 

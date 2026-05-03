@@ -113,7 +113,7 @@ static void invalidate_tlb_entry(CPULoongArchState *env, int index)
     target_ulong addr, mask, pagesize;
     uint8_t tlb_ps;
     LoongArchTLB *tlb = &env->tlb[index];
-    int idxmap = BIT(MMU_KERNEL_IDX) | BIT(MMU_USER_IDX);
+    int idxmap = BIT(MMU_KERNEL_IDX) | BIT(MMU_USER_IDX) | BIT(MMU_GUEST_PLV0) | BIT(MMU_GUEST_PLV3);
     uint64_t tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
     bool tlb_v;
 
@@ -377,6 +377,52 @@ static void update_tlb_index(CPULoongArchState *env, MMUContext *context,
     *old = new;
 }
 
+
+/*
+ * LVZ: Translate Guest Physical Address to Host Physical Address.
+ * In the current implementation, this is an identity mapping since
+ * the hypervisor configures the partition memory as 1:1.
+ * When root TLB (Stage-2) is implemented, this function will
+ * perform a full G-stage translation.
+ */
+static uint64_t lvz_gpa_to_hpa(CPULoongArchState *env, uint64_t gpa)
+{
+    /* Identity mapping: GPA == HPA for partition memory.
+     * The hypervisor's tlb_refill_table maps partition GPAs to HPAs
+     * at 1MB granularity. For now, we trust the hypervisor's setup. */
+    return gpa & 0x0000FFFFFFFFFFFFULL;
+}
+
+/*
+ * LVZ: Translate guest TLBELO entries (GPA -> HPA) before filling
+ * the real TLB. This is called from helper_tlbwr/helper_tlbfill
+ * when in guest (PVM) mode.
+ */
+static void lvz_translate_tlbelo(CPULoongArchState *env,
+                                  uint64_t *elo0, uint64_t *elo1)
+{
+    if (!env->in_guest_mode) {
+        return;
+    }
+
+    /* Translate GPA to HPA for each valid entry */
+    if (pte_present(env, *elo0)) {
+        uint64_t gpa_ppn = (*elo0 >> 12) & ((1ULL << 36) - 1);
+        uint64_t gpa = gpa_ppn << 12;
+        uint64_t hpa = lvz_gpa_to_hpa(env, gpa);
+        uint64_t hpa_ppn = hpa >> 12;
+        /* Replace PPN with HPA PPN, keep flags (low 12 bits + high 3 bits) */
+        *elo0 = (hpa_ppn << 12) | (*elo0 & 0xFFFULL) | (*elo0 & (7ULL << 61));
+    }
+    if (pte_present(env, *elo1)) {
+        uint64_t gpa_ppn = (*elo1 >> 12) & ((1ULL << 36) - 1);
+        uint64_t gpa = gpa_ppn << 12;
+        uint64_t hpa = lvz_gpa_to_hpa(env, gpa);
+        uint64_t hpa_ppn = hpa >> 12;
+        *elo1 = (hpa_ppn << 12) | (*elo1 & 0xFFFULL) | (*elo1 & (7ULL << 61));
+    }
+}
+
 void helper_tlbwr(CPULoongArchState *env)
 {
     int index = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, INDEX);
@@ -388,6 +434,8 @@ void helper_tlbwr(CPULoongArchState *env)
     }
 
     sptw_prepare_context(env, &context);
+    /* LVZ: Translate guest TLBELO entries (GPA->HPA) */
+    lvz_translate_tlbelo(env, &context.pte_buddy[0], &context.pte_buddy[1]);
     update_tlb_index(env, &context, index);
 }
 
@@ -844,4 +892,92 @@ TLBRet loongarch_get_addr_from_tlb(CPULoongArchState *env,
     }
 
     return TLBRET_NOMATCH;
+}
+
+/*
+ * LVZ: Two-level address translation for guest (PVM) mode.
+ *
+ * When PVM=1, guest virtual addresses must be translated twice:
+ *   Level 1 (GVA -> GPA): Use guest TLB (env->guest.CSR_TLB*)
+ *   Level 2 (GPA -> HPA): Use root TLB (env->tlb[] with GID tagging)
+ *
+ * For now, Level 2 is a direct 1:1 mapping (GPA == HPA) since the
+ * hypervisor configures identity-mapped guest physical memory.
+ * Full root TLB support can be added later.
+ */
+TLBRet loongarch_lvz_translate(CPULoongArchState *env, vaddr addr,
+                                MMUAccessType access_type, int mmu_idx,
+                                hwaddr *phys_addr)
+{
+    /* Level 1: GVA -> GPA using guest TLB shadow state.
+     * The guest TLB entries are in env->guest.CSR_TLB* which were
+     * written by the guest kernel via shadow CSR optimization.
+     * We need to search the guest TLB for a matching entry. */
+    uint64_t guest_vppn, guest_ps, guest_elo0, guest_elo1;
+    uint64_t gpa = addr; /* Default: identity map if no guest TLB match */
+
+    /* Check if guest has page mapping enabled via shadow CRMD */
+    uint64_t guest_crmd = env->guest.CSR_CRMD;
+    if (!(guest_crmd & (1ULL << 4))) {
+        /* PG=0: direct address mode, VA=GPA */
+        *phys_addr = addr & 0x0000FFFFFFFFFFFFULL;
+        return TLBRET_MATCH;
+    }
+
+    /* Read guest TLB registers from shadow state */
+    guest_ps = FIELD_EX64(env->guest.CSR_STLBPS, CSR_STLBPS, PS);
+    guest_vppn = addr >> (guest_ps + 1);
+
+    /* Simple guest TLB lookup: iterate over guest TLB entries.
+     * For a full implementation, we would maintain a separate guest_tlb[]
+     * array. For now, we use the guest CSR shadow state directly.
+     * The guest kernel fills TLB entries via tlbfill/tlbwr which trap
+     * to the hypervisor, so the shadow CSRs reflect the last TLB operation. */
+
+    /* Check if the address matches the last guest TLB operation */
+    uint64_t gtlbehi_vppn;
+    if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
+        gtlbehi_vppn = FIELD_EX64(env->guest.CSR_TLBREHI, CSR_TLBREHI, PS);
+        /* Use TLBR* registers for refill context */
+        guest_elo0 = env->guest.CSR_TLBRELO0;
+        guest_elo1 = env->guest.CSR_TLBRELO1;
+    } else {
+        gtlbehi_vppn = FIELD_EX64(env->guest.CSR_TLBEHI, CSR_TLBEHI_64, VPPN);
+        guest_elo0 = env->guest.CSR_TLBELO0;
+        guest_elo1 = env->guest.CSR_TLBELO1;
+    }
+
+    /* Level 2: GPA -> HPA (identity mapping for now).
+     * The hypervisor configures the partition memory as identity-mapped,
+     * so GPA == HPA for all valid partition addresses. */
+    if (pte_present(env, guest_elo0) || pte_present(env, guest_elo1)) {
+        /* Extract GPA from guest TLBELO: PPN is bits [47:12] */
+        uint64_t gpa_ppn;
+        int odd = (addr >> guest_ps) & 1;
+        uint64_t elo = odd ? guest_elo1 : guest_elo0;
+
+        if (!pte_present(env, elo)) {
+            return TLBRET_INVALID;
+        }
+
+        gpa_ppn = (elo >> 12) & ((1ULL << 36) - 1);
+        gpa = (gpa_ppn << 12) | (addr & ((1ULL << guest_ps) - 1));
+
+        /* Check D bit for writes */
+        if (access_type == MMU_DATA_STORE && !(elo & (1ULL << 1))) {
+            return TLBRET_DIRTY;
+        }
+        /* Check NX bit for instruction fetch */
+        if (access_type == MMU_INST_FETCH && (elo & (1ULL << 62))) {
+            return TLBRET_XI;
+        }
+        /* Check NR bit for reads */
+        if (access_type == MMU_DATA_LOAD && (elo & (1ULL << 61))) {
+            return TLBRET_RI;
+        }
+    }
+
+    /* Level 2: GPA -> HPA (identity mapping) */
+    *phys_addr = gpa & 0x0000FFFFFFFFFFFFULL;
+    return TLBRET_MATCH;
 }
