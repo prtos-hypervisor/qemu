@@ -185,6 +185,26 @@ static bool guest_csr_write_needs_trap(unsigned int csr_num)
     }
 }
 
+/*
+ * CSRs that must trap via GSPR on read in PVM mode.
+ * These require hypervisor intervention because the hypervisor
+ * modifies the guest's view of these CSRs (e.g. ESTAT for IRQ).
+ */
+static bool guest_csr_read_needs_trap(unsigned int csr_num)
+{
+    switch (csr_num) {
+    case LOONGARCH_CSR_ESTAT:  /* Exception Status - hypervisor sets IS bits */
+    case LOONGARCH_CSR_ERA:    /* Exception Return Address - set by ertn */
+    case LOONGARCH_CSR_CRMD:   /* Current Mode - set by ertn */
+    case LOONGARCH_CSR_ECFG:   /* Exception Config - guest checks against ESTAT */
+    case LOONGARCH_CSR_EENTRY: /* Exception Entry - set by guest, read by IRQ */
+    case LOONGARCH_CSR_PRMD:   /* Previous Mode - set by guest, used by ertn */
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool set_csr_trans_func(unsigned int csr_num, GenCSRRead readfn,
                                GenCSRWrite writefn)
 {
@@ -245,13 +265,23 @@ static bool trans_csrrd(DisasContext *ctx, arg_csrrd *a)
     }
 
     /*
-     * LVZ: Always trap CSR reads in PVM mode so the hypervisor
-     * can maintain consistent guest CSR state.  The shadow
-     * optimization is disabled because the hypervisor modifies
-     * guest CSR state (ESTAT, ERA, CRMD) on interrupt delivery
-     * and needs to be the single source of truth.
+     * LVZ inline optimization: in PVM mode, read from guest CSR shadow
+     * directly without generating a GSPR trap, unless the CSR needs
+     * hypervisor intervention.
      */
     if (ctx->pvm) {
+        if (guest_csr_read_needs_trap(a->csr)) {
+            generate_exception(ctx, EXCCODE_GSPR);
+            return true;
+        }
+        int guest_off = get_guest_csr_offset(a->csr);
+        if (guest_off >= 0) {
+            dest = gpr_dst(ctx, a->rd, EXT_NONE);
+            tcg_gen_ld_tl(dest, tcg_env, guest_off);
+            gen_set_gpr(a->rd, dest, EXT_NONE);
+            return true;
+        }
+        /* CSR not in guest shadow - trap to hypervisor */
         generate_exception(ctx, EXCCODE_GSPR);
         return true;
     }
@@ -286,10 +316,25 @@ static bool trans_csrwr(DisasContext *ctx, arg_csrwr *a)
     }
 
     /*
-     * LVZ: Always trap CSR writes in PVM mode so the hypervisor
-     * can maintain consistent guest CSR state.
+     * LVZ inline optimization: in PVM mode, write to guest CSR shadow
+     * directly without generating a GSPR trap for most CSRs.
      */
     if (ctx->pvm) {
+        if (guest_csr_write_needs_trap(a->csr)) {
+            generate_exception(ctx, EXCCODE_GSPR);
+            return true;
+        }
+        int guest_off = get_guest_csr_offset(a->csr);
+        if (guest_off >= 0) {
+            TCGv newval = tcg_temp_new();
+            TCGv oldval = tcg_temp_new();
+            tcg_gen_mov_tl(newval, gpr_src(ctx, a->rd, EXT_NONE));
+            tcg_gen_ld_tl(oldval, tcg_env, guest_off);
+            tcg_gen_st_tl(newval, tcg_env, guest_off);
+            gen_set_gpr(a->rd, oldval, EXT_NONE);
+            return true;
+        }
+        /* CSR not in guest shadow - trap to hypervisor */
         generate_exception(ctx, EXCCODE_GSPR);
         return true;
     }
@@ -330,9 +375,31 @@ static bool trans_csrxchg(DisasContext *ctx, arg_csrxchg *a)
     }
 
     /*
-     * LVZ: Always trap CSR exchanges in PVM mode.
+     * LVZ inline optimization: in PVM mode, do masked exchange on
+     * guest CSR shadow directly, unless the CSR needs hypervisor
+     * intervention.
      */
     if (ctx->pvm) {
+        if (guest_csr_write_needs_trap(a->csr)) {
+            generate_exception(ctx, EXCCODE_GSPR);
+            return true;
+        }
+        int guest_off = get_guest_csr_offset(a->csr);
+        if (guest_off >= 0) {
+            src1 = gpr_src(ctx, a->rd, EXT_NONE);
+            mask = gpr_src(ctx, a->rj, EXT_NONE);
+            oldv = tcg_temp_new();
+            newv = tcg_temp_new();
+            temp = tcg_temp_new();
+
+            tcg_gen_ld_tl(oldv, tcg_env, guest_off);
+            tcg_gen_and_tl(newv, src1, mask);
+            tcg_gen_andc_tl(temp, oldv, mask);
+            tcg_gen_or_tl(newv, newv, temp);
+            tcg_gen_st_tl(newv, tcg_env, guest_off);
+            gen_set_gpr(a->rd, oldv, EXT_NONE);
+            return true;
+        }
         generate_exception(ctx, EXCCODE_GSPR);
         return true;
     }
