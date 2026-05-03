@@ -77,6 +77,24 @@ static bool check_plv_gspr(DisasContext *ctx)
 }
 
 /*
+ * LVZ: Check if GCFG.TOP (Trap On Privilege) is set.
+ * When TOP=1, ALL privileged instructions in guest mode trap via GSPR,
+ * giving the hypervisor full control over guest CSR state. When TOP=0,
+ * the shadow optimization allows direct guest CSR access for performance.
+ * Returns true if TOP is set (full trap-and-emulate mode).
+ */
+static bool lvz_gcfg_top_is_set(DisasContext *ctx)
+{
+    if (!ctx->pvm) {
+        return false;
+    }
+    /* GCFG.TOP is bit 13. Read from env->CSR_GCFG.
+     * We can't use ctx->cpucfg_gcfg because GCFG is runtime-changeable,
+     * so we use a helper to read it at translation time. */
+    return (ctx->cpucfg_gcfg >> 13) & 1;
+}
+
+/*
  * LVZ inline guest CSR optimization:
  * When in PVM mode, most CSR accesses can go directly to the guest CSR
  * shadow in CPULoongArchState.guest.* without generating a GSPR trap.
@@ -196,9 +214,9 @@ static bool guest_csr_read_needs_trap(unsigned int csr_num)
     case LOONGARCH_CSR_ESTAT:  /* Exception Status - hypervisor sets IS bits */
     case LOONGARCH_CSR_ERA:    /* Exception Return Address - set by ertn */
     case LOONGARCH_CSR_CRMD:   /* Current Mode - set by ertn */
-    case LOONGARCH_CSR_ECFG:   /* Exception Config - guest checks against ESTAT */
-    case LOONGARCH_CSR_EENTRY: /* Exception Entry - set by guest, read by IRQ */
-    case LOONGARCH_CSR_PRMD:   /* Previous Mode - set by guest, used by ertn */
+    case LOONGARCH_CSR_ECFG:   /* Exception Config - guest checks vs ESTAT */
+    case LOONGARCH_CSR_EENTRY: /* Exception Entry - set by guest */
+    case LOONGARCH_CSR_PRMD:   /* Previous Mode - used by ertn */
         return true;
     default:
         return false;
@@ -270,6 +288,12 @@ static bool trans_csrrd(DisasContext *ctx, arg_csrrd *a)
      * hypervisor intervention.
      */
     if (ctx->pvm) {
+        /* GCFG.TOP=1: trap ALL CSR accesses to hypervisor */
+        if (lvz_gcfg_top_is_set(ctx)) {
+            generate_exception(ctx, EXCCODE_GSPR);
+            return true;
+        }
+        /* Shadow optimization: direct access to guest CSR shadow */
         if (guest_csr_read_needs_trap(a->csr)) {
             generate_exception(ctx, EXCCODE_GSPR);
             return true;
@@ -320,6 +344,12 @@ static bool trans_csrwr(DisasContext *ctx, arg_csrwr *a)
      * directly without generating a GSPR trap for most CSRs.
      */
     if (ctx->pvm) {
+        /* GCFG.TOP=1: trap ALL CSR accesses to hypervisor */
+        if (lvz_gcfg_top_is_set(ctx)) {
+            generate_exception(ctx, EXCCODE_GSPR);
+            return true;
+        }
+        /* Shadow optimization: direct access to guest CSR shadow */
         if (guest_csr_write_needs_trap(a->csr)) {
             generate_exception(ctx, EXCCODE_GSPR);
             return true;
@@ -380,6 +410,12 @@ static bool trans_csrxchg(DisasContext *ctx, arg_csrxchg *a)
      * intervention.
      */
     if (ctx->pvm) {
+        /* GCFG.TOP=1: trap ALL CSR accesses to hypervisor */
+        if (lvz_gcfg_top_is_set(ctx)) {
+            generate_exception(ctx, EXCCODE_GSPR);
+            return true;
+        }
+        /* Shadow optimization: direct access to guest CSR shadow */
         if (guest_csr_write_needs_trap(a->csr)) {
             generate_exception(ctx, EXCCODE_GSPR);
             return true;
