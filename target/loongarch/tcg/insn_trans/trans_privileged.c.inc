@@ -211,6 +211,15 @@ static bool guest_csr_write_needs_trap(unsigned int csr_num)
     case LOONGARCH_CSR_PGDH:
     case LOONGARCH_CSR_PWCL:
     case LOONGARCH_CSR_PWCH:
+    /* TLB refill CSRs - must trap to protect host TLBRENTRY */
+    case LOONGARCH_CSR_TLBRENTRY:
+    case LOONGARCH_CSR_TLBRBADV:
+    case LOONGARCH_CSR_TLBRERA:
+    case LOONGARCH_CSR_TLBRSAVE:
+    case LOONGARCH_CSR_TLBRELO0:
+    case LOONGARCH_CSR_TLBRELO1:
+    case LOONGARCH_CSR_TLBREHI:
+    case LOONGARCH_CSR_TLBRPRMD:
         return true;
     default:
         return false;
