@@ -197,6 +197,16 @@ static bool guest_csr_write_needs_trap(unsigned int csr_num)
     case LOONGARCH_CSR_ECFG:   /* Exception Config - needed for IRQ delivery */
     case LOONGARCH_CSR_ESTAT:  /* Exception Status - needed for IRQ delivery */
     case LOONGARCH_CSR_CRMD:   /* Current Mode - needed for IRQ delivery */
+    case LOONGARCH_CSR_TLBIDX: /* TLB Index - needed for tlbfill emulation */
+    case LOONGARCH_CSR_TLBEHI: /* TLB Entry High - needed for tlbfill emulation */
+    case LOONGARCH_CSR_TLBELO0:/* TLB Entry Low 0 - needed for tlbfill emulation */
+    case LOONGARCH_CSR_TLBELO1:/* TLB Entry Low 1 - needed for tlbfill emulation */
+    case LOONGARCH_CSR_ASID:   /* Address Space ID - needed for TLB management */
+    case LOONGARCH_CSR_PGDL:   /* Page Directory Low - needed for page walking */
+    case LOONGARCH_CSR_PGDH:   /* Page Directory High - needed for page walking */
+    case LOONGARCH_CSR_PWCL:   /* Page Walk Config Low - needed for page walking */
+    case LOONGARCH_CSR_PWCH:   /* Page Walk Config High - needed for page walking */
+    case LOONGARCH_CSR_STLBPS: /* Stored TLB Page Size - needed for tlbwr */
         return true;
     default:
         return false;
