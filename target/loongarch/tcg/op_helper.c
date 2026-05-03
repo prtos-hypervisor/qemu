@@ -127,6 +127,16 @@ void helper_ertn(CPULoongArchState *env)
     env->CSR_CRMD = FIELD_DP64(env->CSR_CRMD, CSR_CRMD, IE, csr_pie);
 
     env->lladdr = 1;
+
+    /*
+     * LVZ: If GSTAT.PVM=1 and we're not currently in guest mode,
+     * the host hypervisor is returning to guest. Enter guest mode.
+     * The hypervisor manages guest CSR state in software, so we just
+     * need to track the PVM mode flag.
+     */
+    if (!env->in_guest_mode && FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, PVM)) {
+        loongarch_lvz_vm_entry(env);
+    }
 }
 
 void helper_idle(CPULoongArchState *env)

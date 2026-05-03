@@ -144,6 +144,7 @@ static void loongarch_tr_init_disas_context(DisasContextBase *dcbase,
 
     ctx->la64 = is_la64(env);
     ctx->va32 = (ctx->base.tb->flags & HW_FLAGS_VA32) != 0;
+    ctx->pvm = (ctx->base.tb->flags & HW_FLAGS_PVM) != 0;
 
     ctx->zero = tcg_constant_tl(0);
 

@@ -321,6 +321,9 @@ static void loongarch_la464_initfn(Object *obj)
     data = FIELD_DP32(data, CPUCFG2, LLFTP_VER, 1);
     data = FIELD_DP32(data, CPUCFG2, LSPW, 1);
     data = FIELD_DP32(data, CPUCFG2, LAM, 1);
+    /* LVZ shim: advertise virtualization extension */
+    data = FIELD_DP32(data, CPUCFG2, LVZ, 1);
+    data = FIELD_DP32(data, CPUCFG2, LVZ_VER, 1);
     env->cpucfg[2] = data;
 
     data = 0;

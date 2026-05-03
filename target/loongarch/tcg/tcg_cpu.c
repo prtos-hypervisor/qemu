@@ -39,6 +39,9 @@ static const struct TypeExcp excp_names[] = {
     {EXCCODE_IPE, "Instruction privilege error"},
     {EXCCODE_FPD, "Floating Point Disabled"},
     {EXCCODE_FPE, "Floating Point Exception"},
+    {EXCCODE_GSPR, "Guest Sensitive Privileged Resource"},
+    {EXCCODE_HVC, "HyperVisor Call"},
+    {EXCCODE_GCM, "Guest CSR Modified"},
     {EXCCODE_DBP, "Debug breakpoint"},
     {EXCCODE_BCE, "Bound Check Exception"},
     {EXCCODE_SXD, "128 bit vector instructions Disable exception"},
@@ -74,6 +77,29 @@ void G_NORETURN do_raise_exception(CPULoongArchState *env,
 }
 
 #ifndef CONFIG_USER_ONLY
+
+/*
+ * LVZ: VM exit - transition from guest (PVM) mode to host mode.
+ * Clear PVM and the cached in_guest_mode flag.
+ * The host hypervisor (e.g., PRTOS) manages guest CSR state in software,
+ * so we don't need to save/restore CSR state here.
+ */
+void loongarch_lvz_vm_exit(CPULoongArchState *env)
+{
+    env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 0);
+    env->in_guest_mode = false;
+}
+
+/*
+ * LVZ: VM entry - transition from host mode to guest (PVM) mode.
+ * Set PVM and the cached in_guest_mode flag.
+ */
+void loongarch_lvz_vm_entry(CPULoongArchState *env)
+{
+    env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 1);
+    env->in_guest_mode = true;
+}
+
 static void loongarch_cpu_do_interrupt(CPUState *cs)
 {
     CPULoongArchState *env = cpu_env(cs);
@@ -131,6 +157,9 @@ static void loongarch_cpu_do_interrupt(CPUState *cs)
     case EXCCODE_PME:
     case EXCCODE_PNR:
     case EXCCODE_PPI:
+    case EXCCODE_GSPR:
+    case EXCCODE_HVC:
+    case EXCCODE_GCM:
         cause = cs->exception_index;
         break;
     default:
@@ -143,6 +172,21 @@ static void loongarch_cpu_do_interrupt(CPUState *cs)
         MemOpIdx oi = make_memop_idx(MO_LEUL, cpu_mmu_index(cs, true));
 
         env->CSR_BADI = cpu_ldl_code_mmu(env, env->pc, oi, 0);
+    }
+
+    /*
+     * LVZ: When in guest (PVM) mode and a GSPR/HVC/timer exception occurs,
+     * we do NOT clear PVM here. The exception is delivered normally to the
+     * host's EENTRY, and the host hypervisor's trap entry code detects
+     * PVM=1, clears it, and handles the VM exit.
+     *
+     * However, we do need to clear the cached in_guest_mode flag so that
+     * the host hypervisor's exception handler code (which uses CSR/TLB
+     * instructions) does not itself generate GSPR. The actual PVM bit
+     * in CSR_GSTAT remains set for the trap handler to detect.
+     */
+    if (env->in_guest_mode && cause >= 0) {
+        env->in_guest_mode = false;
     }
 
     /* Save PLV and IE */
@@ -278,6 +322,7 @@ static TCGTBCPUState loongarch_get_tb_cpu_state(CPUState *cs)
     flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, SXE) * HW_FLAGS_EUEN_SXE;
     flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, ASXE) * HW_FLAGS_EUEN_ASXE;
     flags |= is_va32(env) * HW_FLAGS_VA32;
+    flags |= env->in_guest_mode * HW_FLAGS_PVM;
 
     return (TCGTBCPUState){ .pc = env->pc, .flags = flags };
 }

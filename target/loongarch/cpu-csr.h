@@ -84,6 +84,35 @@ FIELD(TLBENTRY_64, RPLV, 63, 1)
 FIELD(CSR_ASID, ASID, 0, 10)
 FIELD(CSR_ASID, ASIDBITS, 16, 8)
 
+/* LVZ (LoongArch Virtualization) */
+#define LOONGARCH_CSR_GTLBC          0x15 /* Guest TLB control */
+FIELD(CSR_GTLBC, TGID, 0, 8)       /* Trap Guest ID */
+FIELD(CSR_GTLBC, TOTI, 13, 1)      /* Trap on TLB instruction */
+FIELD(CSR_GTLBC, USERID, 16, 8)    /* User-defined Guest ID */
+
+#define LOONGARCH_CSR_GSTAT          0x50 /* Guest status */
+FIELD(CSR_GSTAT, PGM, 0, 1)        /* Processor Guest Mode (host read-only) */
+FIELD(CSR_GSTAT, PVM, 1, 1)        /* Processor Virtualization Mode */
+FIELD(CSR_GSTAT, GIDBIT, 4, 4)     /* Guest ID bit width */
+FIELD(CSR_GSTAT, GID, 16, 8)       /* Guest ID */
+
+#define LOONGARCH_CSR_GCFG           0x51 /* Guest config */
+FIELD(CSR_GCFG, MATC, 0, 2)        /* MAT Control (0=guest, 1=root) */
+FIELD(CSR_GCFG, MATP_H, 2, 2)      /* MAT Passthrough High */
+FIELD(CSR_GCFG, MATP_L, 4, 2)      /* MAT Passthrough Low */
+FIELD(CSR_GCFG, TOE, 8, 1)         /* Trap on Exception (sync exc → host) */
+FIELD(CSR_GCFG, TIT, 9, 1)         /* Trap on Timer Interrupt */
+FIELD(CSR_GCFG, TOHU, 10, 1)       /* Trap on HW-Unmasked interrupt */
+FIELD(CSR_GCFG, TORU, 11, 1)       /* Trap on Reserved-Unmasked interrupt */
+FIELD(CSR_GCFG, TOCI, 12, 1)       /* Trap on CSR Instruction */
+FIELD(CSR_GCFG, TOP, 13, 1)        /* Trap on Privilege (IPE) */
+FIELD(CSR_GCFG, TOIM, 14, 8)       /* Trap on Interrupt Mask (per HWI) */
+
+#define LOONGARCH_CSR_GINTC          0x52 /* Guest interrupt control */
+FIELD(CSR_GINTC, VIP, 0, 8)        /* Virtual IP to inject */
+FIELD(CSR_GINTC, PIP, 8, 8)        /* Physical IP passthrough */
+FIELD(CSR_GINTC, HIP, 16, 8)       /* Hardware IP pending */
+
 /* Page table base address when badv[47] = 0 */
 #define LOONGARCH_CSR_PGDL           0x19
 /* Page table base address when badv[47] = 1 */

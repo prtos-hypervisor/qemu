@@ -44,6 +44,30 @@ static bool trans_asrtgt_d(DisasContext *ctx, arg_asrtgt_d * a)
 static bool gen_rdtime(DisasContext *ctx, arg_rr *a,
                        bool word, bool high)
 {
+    /*
+     * LVZ inline optimization: in PVM mode, read stable counter directly
+     * and add guest CNTC offset, return guest TID in rj.
+     * This avoids a costly GSPR trap for every rdtime instruction.
+     */
+    if (ctx->pvm) {
+        TCGv dst1 = gpr_dst(ctx, a->rd, EXT_NONE);
+        TCGv dst2 = gpr_dst(ctx, a->rj, EXT_NONE);
+
+        translator_io_start(&ctx->base);
+        gen_helper_rdtime_d(dst1, tcg_env);
+        /* Add guest counter compensation (CNTC) */
+        TCGv cntc = tcg_temp_new();
+        tcg_gen_ld_tl(cntc, tcg_env,
+                      offsetof(CPULoongArchState, guest.CSR_CNTC));
+        tcg_gen_add_tl(dst1, dst1, cntc);
+        if (word) {
+            tcg_gen_sextract_tl(dst1, dst1, high ? 32 : 0, 32);
+        }
+        /* Return guest TID */
+        tcg_gen_ld_i64(dst2, tcg_env,
+                       offsetof(CPULoongArchState, guest.CSR_TID));
+        return true;
+    }
     TCGv dst1 = gpr_dst(ctx, a->rd, EXT_NONE);
     TCGv dst2 = gpr_dst(ctx, a->rj, EXT_NONE);
 
@@ -78,6 +102,10 @@ static bool trans_rdtime_d(DisasContext *ctx, arg_rdtime_d *a)
 
 static bool trans_cpucfg(DisasContext *ctx, arg_cpucfg *a)
 {
+    /*
+     * LVZ inline optimization: in PVM mode, CPUCFG can execute directly
+     * without trapping. The guest sees the same CPU features as the host.
+     */
     TCGv dest = gpr_dst(ctx, a->rd, EXT_NONE);
     TCGv src1 = gpr_src(ctx, a->rj, EXT_NONE);
 

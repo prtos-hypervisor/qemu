@@ -178,3 +178,18 @@ target_ulong helper_csrwr_pwch(CPULoongArchState *env, target_ulong val)
     env->CSR_PWCH = val;
     return old_v;
  }
+
+target_ulong helper_csrwr_gstat(CPULoongArchState *env, target_ulong val)
+{
+    int64_t old_v = env->CSR_GSTAT;
+
+    env->CSR_GSTAT = val;
+    /*
+     * Do NOT update in_guest_mode here. The PVM bit is set by the
+     * hypervisor before ERTN, but we only want to enter guest mode
+     * at the ERTN boundary (in helper_ertn). Otherwise, host code
+     * between csrwr(GSTAT) and ertn would incorrectly generate GSPR.
+     */
+
+    return old_v;
+}
