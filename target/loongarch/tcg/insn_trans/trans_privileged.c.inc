@@ -189,14 +189,28 @@ static int get_guest_csr_offset(unsigned int csr_num)
 static bool guest_csr_write_needs_trap(unsigned int csr_num)
 {
     switch (csr_num) {
-    case LOONGARCH_CSR_TCFG:   /* Timer config - hypervisor manages deadline */
-    case LOONGARCH_CSR_TICLR:  /* Timer interrupt clear */
-    case LOONGARCH_CSR_ERA:    /* Exception Return Address - needed for ertn */
-    case LOONGARCH_CSR_PRMD:   /* Previous Mode - needed for ertn */
-    case LOONGARCH_CSR_EENTRY: /* Exception Entry - needed for IRQ delivery */
-    case LOONGARCH_CSR_ECFG:   /* Exception Config - needed for IRQ delivery */
-    case LOONGARCH_CSR_ESTAT:  /* Exception Status - needed for IRQ delivery */
-    case LOONGARCH_CSR_CRMD:   /* Current Mode - needed for IRQ delivery */
+    /* Timer CSRs - hypervisor manages guest timer */
+    case LOONGARCH_CSR_TCFG:
+    case LOONGARCH_CSR_TICLR:
+    /* Exception/Interrupt CSRs - needed for ertn and IRQ delivery */
+    case LOONGARCH_CSR_ERA:
+    case LOONGARCH_CSR_PRMD:
+    case LOONGARCH_CSR_EENTRY:
+    case LOONGARCH_CSR_ECFG:
+    case LOONGARCH_CSR_ESTAT:
+    case LOONGARCH_CSR_CRMD:
+    /* TLB management CSRs - needed for tlbfill/tlbwr GPA->HPA translation */
+    case LOONGARCH_CSR_TLBIDX:
+    case LOONGARCH_CSR_TLBEHI:
+    case LOONGARCH_CSR_TLBELO0:
+    case LOONGARCH_CSR_TLBELO1:
+    case LOONGARCH_CSR_ASID:
+    case LOONGARCH_CSR_STLBPS:
+    /* Page table walking CSRs - needed for LDDIR/LDPTE emulation */
+    case LOONGARCH_CSR_PGDL:
+    case LOONGARCH_CSR_PGDH:
+    case LOONGARCH_CSR_PWCL:
+    case LOONGARCH_CSR_PWCH:
         return true;
     default:
         return false;
