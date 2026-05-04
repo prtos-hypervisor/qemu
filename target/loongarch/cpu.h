@@ -479,6 +479,24 @@ typedef struct CPUArchState {
     } guest;
     /* Is CPU in guest (PVM) mode? Cached from CSR_GSTAT.PVM for fast check */
     bool in_guest_mode;
+    /*
+     * LVZ: Guest timer offset (GCNT virtualization).
+     *
+     * When the guest reads CSR_CNTC, return host_stable_counter - offset.
+     * This gives the guest a virtualized time base that can be skewed
+     * relative to the host for save/restore and migration purposes.
+     * Updated on VM entry to reflect the difference between host and
+     * guest view of time.
+     */
+    uint64_t guest_timer_offset;
+    /*
+     * LVZ: Cached Guest INterrupt Control state.
+     *
+     * Mirrors CSR_GINTC for fast access during virtual interrupt
+     * injection.  VIP bits set here are ORed into the guest's ESTAT
+     * during VM entry and when the guest reads CSR_ESTAT.
+     */
+    uint64_t guest_gintc;
     struct {
         uint64_t guest_addr;
     } stealtime;

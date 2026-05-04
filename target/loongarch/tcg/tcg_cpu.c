@@ -81,13 +81,15 @@ void G_NORETURN do_raise_exception(CPULoongArchState *env,
 /*
  * LVZ: VM exit - transition from guest (PVM) mode to host mode.
  * Clear PVM and the cached in_guest_mode flag.
- * The host hypervisor (e.g., PRTOS) manages guest CSR state in software,
- * so we don't need to save/restore CSR state here.
+ * Save the guest CNTC (stable counter) view so it remains consistent
+ * across VM exit/entry cycles.
  */
 void loongarch_lvz_vm_exit(CPULoongArchState *env)
 {
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 0);
     env->in_guest_mode = false;
+    /* Save guest CNTC view: guest_cntc = host_cntc - offset */
+    env->guest.CSR_CNTC = env->CSR_CNTC - env->guest_timer_offset;
     /* Flush TLB to switch from guest MMU indices back to host */
     tlb_flush(env_cpu(env));
 }
@@ -96,6 +98,8 @@ void loongarch_lvz_vm_exit(CPULoongArchState *env)
  * LVZ: VM entry - transition from host mode to guest (PVM) mode.
  * Set PVM and the cached in_guest_mode flag.
  * Flush the primary TLB (MMU index switch) and root TLB (new guest).
+ * Initialise the GCNT offset so the guest sees a consistent view of
+ * the stable counter.
  */
 void loongarch_lvz_vm_entry(CPULoongArchState *env)
 {
@@ -105,6 +109,15 @@ void loongarch_lvz_vm_entry(CPULoongArchState *env)
     tlb_flush(env_cpu(env));
     /* Reset root TLB for the new guest context */
     loongarch_root_tlb_flush(env);
+    /*
+     * GCNT offset: the guest's view of CNTC starts at the current host
+     * counter value minus whatever the guest has already written to
+     * CSR_CNTC (stored in its shadow).  This gives the guest a
+     * continuous view across VM exits/entries.
+     */
+    uint64_t host_cntc = env->CSR_CNTC; /* Host view of stable counter */
+    uint64_t guest_cntc = env->guest.CSR_CNTC;
+    env->guest_timer_offset = host_cntc - guest_cntc;
 }
 
 static void loongarch_cpu_do_interrupt(CPUState *cs)

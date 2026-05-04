@@ -193,3 +193,50 @@ target_ulong helper_csrwr_gstat(CPULoongArchState *env, target_ulong val)
 
     return old_v;
 }
+
+target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
+{
+    int64_t old_v = env->CSR_GINTC;
+
+    env->CSR_GINTC = val;
+    env->guest_gintc = val;
+
+    /*
+     * When the hypervisor sets VIP (Virtual Interrupt Pending) bits,
+     * inject the corresponding interrupts into the guest's view of
+     * ESTAT so they are delivered on the next guest interrupt window.
+     *
+     * GINTC.VIP bits are ORed into ESTAT.IS (Interrupt Status).
+     * The hypervisor is responsible for clearing them after delivery.
+     */
+    uint64_t vip = FIELD_EX64(val, CSR_GINTC, VIP);
+    if (vip) {
+        /*
+         * Inject VIP bits into the guest shadow ESTAT.
+         * The hypervisor reads guest ESTAT via GSPR trap, so we need
+         * to update env->guest.CSR_ESTAT so that the hypervisor's
+         * guest_csr_read() returns the injected bits.
+         *
+         * VIP bit 0 -> IPI (inter-processor interrupt, ESTAT bit 12)
+         * VIP bit 1 -> TI  (timer interrupt, ESTAT bit 11)
+         * VIP bit 2 -> HW  (hardware interrupt 0)
+         * etc.
+         *
+         * Mapping: VIP[n] -> ESTAT.IS[12 - n] for n=0..7
+         * (adjust mapping as needed for the specific platform)
+         */
+        uint64_t estat_is = 0;
+        if (vip & (1 << 0)) { estat_is |= (1ULL << 12); } /* IPI */
+        if (vip & (1 << 1)) { estat_is |= (1ULL << 11); } /* TI */
+        if (vip & (1 << 2)) { estat_is |= (1ULL << 10); } /* HW0 */
+        if (vip & (1 << 3)) { estat_is |= (1ULL << 9);  } /* HW1 */
+        if (vip & (1 << 4)) { estat_is |= (1ULL << 8);  } /* HW2 */
+        if (vip & (1 << 5)) { estat_is |= (1ULL << 7);  } /* HW3 */
+        if (vip & (1 << 6)) { estat_is |= (1ULL << 6);  } /* HW4 */
+        if (vip & (1 << 7)) { estat_is |= (1ULL << 5);  } /* HW5 */
+
+        env->guest.CSR_ESTAT |= estat_is;
+    }
+
+    return old_v;
+}
