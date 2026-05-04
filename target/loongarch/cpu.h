@@ -259,6 +259,7 @@ FIELD(TLB_MISC, E, 0, 1)
 FIELD(TLB_MISC, ASID, 1, 10)
 FIELD(TLB_MISC, VPPN, 13, 35)
 FIELD(TLB_MISC, PS, 48, 6)
+FIELD(TLB_MISC, GID, 54, 8)   /* LVZ: Guest ID tag */
 
 /*Msg interrupt registers */
 #define N_MSGIS                4

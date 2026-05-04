@@ -90,8 +90,11 @@ void loongarch_lvz_vm_exit(CPULoongArchState *env)
     env->in_guest_mode = false;
     /* Save guest CNTC view: guest_cntc = host_cntc - offset */
     env->guest.CSR_CNTC = env->CSR_CNTC - env->guest_timer_offset;
-    /* Flush TLB to switch from guest MMU indices back to host */
-    tlb_flush(env_cpu(env));
+    /*
+     * No tlb_flush() here: guest and host use separate MMU indices
+     * (MMU_GUEST_PLV0 vs MMU_KERNEL_IDX), so QEMU softmmu maintains
+     * independent TLB entries.  Only flush on guest invtlb/GID change.
+     */
 }
 
 /*

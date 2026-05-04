@@ -231,6 +231,11 @@ static void fill_tlb_entry(CPULoongArchState *env, LoongArchTLB *tlb,
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 1);
     csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, ASID, csr_asid);
+        /* LVZ GID: tag entry with current Guest ID when in guest mode */
+        if (env->in_guest_mode) {
+            uint64_t tlb_gid = FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, GID);
+            tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, GID, tlb_gid);
+        }
 
     tlb->tlb_entry0 = lo0;
     tlb->tlb_entry1 = lo1;
