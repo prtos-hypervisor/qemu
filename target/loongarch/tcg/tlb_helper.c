@@ -33,6 +33,19 @@ static bool tlb_match_asid(bool global, int asid, int tlb_asid)
     return !global && tlb_asid == asid;
 }
 
+/*
+ * LVZ: Return the host or guest CSR value depending on the current mode.
+ * In guest (PVM) mode the guest's shadow CSR is returned; in host mode
+ * the real hardware CSR is returned.  Reduces if/else duplication across
+ * the TLB helper hot paths (sptw_prepare_context, helper_tlbwr,
+ * helper_tlbfill).
+ */
+static inline uint64_t guest_csr64(CPULoongArchState *env,
+                                   uint64_t host_val, uint64_t guest_val)
+{
+    return env->in_guest_mode ? guest_val : host_val;
+}
+
 bool check_ps(CPULoongArchState *env, uint8_t tlb_ps)
 {
     if (tlb_ps >= 64) {
@@ -164,27 +177,15 @@ static void sptw_prepare_context(CPULoongArchState *env, MMUContext *context)
 {
     uint64_t lo0, lo1, csr_vppn;
     uint8_t csr_ps;
-    uint64_t tlbrera, tlbrehi, tlbehi, tlbidx, tlbrelo0, tlbrelo1, tlbelo0, tlbelo1;
 
-    if (env->in_guest_mode) {
-        tlbrera = env->guest.CSR_TLBRERA;
-        tlbrehi = env->guest.CSR_TLBREHI;
-        tlbehi  = env->guest.CSR_TLBEHI;
-        tlbidx  = env->guest.CSR_TLBIDX;
-        tlbrelo0 = env->guest.CSR_TLBRELO0;
-        tlbrelo1 = env->guest.CSR_TLBRELO1;
-        tlbelo0  = env->guest.CSR_TLBELO0;
-        tlbelo1  = env->guest.CSR_TLBELO1;
-    } else {
-        tlbrera = env->CSR_TLBRERA;
-        tlbrehi = env->CSR_TLBREHI;
-        tlbehi  = env->CSR_TLBEHI;
-        tlbidx  = env->CSR_TLBIDX;
-        tlbrelo0 = env->CSR_TLBRELO0;
-        tlbrelo1 = env->CSR_TLBRELO1;
-        tlbelo0  = env->CSR_TLBELO0;
-        tlbelo1  = env->CSR_TLBELO1;
-    }
+    uint64_t tlbrera  = guest_csr64(env, env->CSR_TLBRERA,  env->guest.CSR_TLBRERA);
+    uint64_t tlbrehi  = guest_csr64(env, env->CSR_TLBREHI,  env->guest.CSR_TLBREHI);
+    uint64_t tlbehi   = guest_csr64(env, env->CSR_TLBEHI,   env->guest.CSR_TLBEHI);
+    uint64_t tlbidx   = guest_csr64(env, env->CSR_TLBIDX,   env->guest.CSR_TLBIDX);
+    uint64_t tlbrelo0 = guest_csr64(env, env->CSR_TLBRELO0, env->guest.CSR_TLBRELO0);
+    uint64_t tlbrelo1 = guest_csr64(env, env->CSR_TLBRELO1, env->guest.CSR_TLBRELO1);
+    uint64_t tlbelo0  = guest_csr64(env, env->CSR_TLBELO0,  env->guest.CSR_TLBELO0);
+    uint64_t tlbelo1  = guest_csr64(env, env->CSR_TLBELO1,  env->guest.CSR_TLBELO1);
 
     if (FIELD_EX64(tlbrera, CSR_TLBRERA, ISTLBR)) {
         csr_ps = FIELD_EX64(tlbrehi, CSR_TLBREHI, PS);
@@ -446,12 +447,7 @@ static void lvz_translate_tlbelo(CPULoongArchState *env,
 
 void helper_tlbwr(CPULoongArchState *env)
 {
-    uint64_t tlbidx;
-    if (env->in_guest_mode) {
-        tlbidx = env->guest.CSR_TLBIDX;
-    } else {
-        tlbidx = env->CSR_TLBIDX;
-    }
+    uint64_t tlbidx = guest_csr64(env, env->CSR_TLBIDX, env->guest.CSR_TLBIDX);
     int index = FIELD_EX64(tlbidx, CSR_TLBIDX, INDEX);
 
     MMUContext context;
@@ -538,25 +534,21 @@ void helper_tlbfill(CPULoongArchState *env)
     MMUContext context;
 
     /*
-     * LVZ guest mode: read from guest shadow CSRs so the guest's
-     * TLB management instructions use guest GPA->HPA translation.
+     * LVZ: use guest shadow CSRs when in PVM (guest) mode so that
+     * tlbfill translates the guest's GPA to HPA.  The guest_csr64()
+     * helper selects the host or guest CSR set transparently.
      */
-    if (env->in_guest_mode) {
-        if (FIELD_EX64(env->guest.CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
-            entryhi = env->guest.CSR_TLBREHI;
-            pagesize = FIELD_EX64(env->guest.CSR_TLBREHI, CSR_TLBREHI, PS);
-        } else {
-            entryhi = env->guest.CSR_TLBEHI;
-            pagesize = FIELD_EX64(env->guest.CSR_TLBIDX, CSR_TLBIDX, PS);
-        }
+    uint64_t tlbrera = guest_csr64(env, env->CSR_TLBRERA, env->guest.CSR_TLBRERA);
+    uint64_t tlbrehi = guest_csr64(env, env->CSR_TLBREHI, env->guest.CSR_TLBREHI);
+    uint64_t tlbidx  = guest_csr64(env, env->CSR_TLBIDX,  env->guest.CSR_TLBIDX);
+    uint64_t tlbehi  = guest_csr64(env, env->CSR_TLBEHI,  env->guest.CSR_TLBEHI);
+
+    if (FIELD_EX64(tlbrera, CSR_TLBRERA, ISTLBR)) {
+        entryhi = tlbrehi;
+        pagesize = FIELD_EX64(tlbrehi, CSR_TLBREHI, PS);
     } else {
-        if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
-            entryhi = env->CSR_TLBREHI;
-            pagesize = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI, PS);
-        } else {
-            entryhi = env->CSR_TLBEHI;
-            pagesize = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, PS);
-        }
+        entryhi = tlbehi;
+        pagesize = FIELD_EX64(tlbidx, CSR_TLBIDX, PS);
     }
 
     sptw_prepare_context(env, &context);
