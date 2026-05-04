@@ -199,10 +199,28 @@ static bool guest_csr_write_needs_trap(unsigned int csr_num)
     case LOONGARCH_CSR_ECFG:
     case LOONGARCH_CSR_ESTAT:
     case LOONGARCH_CSR_CRMD:
-    /* TLB management CSRs - QEMU handles via helper_tlbfill/tlbwr using
-     * guest shadow CSRs for two-level GPA->HPA translation */
-    /* Page table walking CSRs - handled via guest shadow */
-    /* TLB refill and TLBRENTRY CSRs - let guest shadow handle in guest mode */
+    /* TLB management CSRs - needed for tlbfill/tlbwr GPA->HPA translation */
+    case LOONGARCH_CSR_TLBIDX:
+    case LOONGARCH_CSR_TLBEHI:
+    case LOONGARCH_CSR_TLBELO0:
+    case LOONGARCH_CSR_TLBELO1:
+    case LOONGARCH_CSR_ASID:
+    case LOONGARCH_CSR_STLBPS:
+    /* Page table walking CSRs - needed for LDDIR/LDPTE emulation */
+    case LOONGARCH_CSR_PGDL:
+    case LOONGARCH_CSR_PGDH:
+    case LOONGARCH_CSR_PWCL:
+    case LOONGARCH_CSR_PWCH:
+    /* TLB refill CSRs - must trap to protect host TLBRENTRY */
+    case LOONGARCH_CSR_TLBRENTRY:
+    case LOONGARCH_CSR_TLBRBADV:
+    case LOONGARCH_CSR_TLBRERA:
+    case LOONGARCH_CSR_TLBRSAVE:
+    case LOONGARCH_CSR_TLBRELO0:
+    case LOONGARCH_CSR_TLBRELO1:
+    case LOONGARCH_CSR_TLBREHI:
+    case LOONGARCH_CSR_TLBRPRMD:
+        return true;
     default:
         return false;
     }
