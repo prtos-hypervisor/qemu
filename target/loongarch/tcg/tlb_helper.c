@@ -400,19 +400,165 @@ static void update_tlb_index(CPULoongArchState *env, MMUContext *context,
 }
 
 
+/* ================================================================
+ *  LVZ Root TLB (Stage-2) implementation
+ *
+ *  The Root TLB caches GPA->HPA translations for the current guest.
+ *  On a miss, the stage-2 page-table walker reads the hypervisor's
+ *  TLB refill table from guest-physical memory (address in CSR_SAVE4).
+ *
+ *  Each entry is tagged with GID (GSTAT.GID) to isolate different
+ *  guest partitions.  The replacement policy is round-robin.
+ * ================================================================ */
+
+/*
+ * Look up a GPA in the Root TLB.
+ * Returns HPA on hit, or ~0ULL on miss.
+ */
+static uint64_t root_tlb_lookup(CPULoongArchState *env, uint64_t gpa,
+                                 uint64_t gid)
+{
+    LoongArchRootTLBState *rt = &env->root_tlb;
+    for (int i = 0; i < rt->count; i++) {
+        LoongArchRootTLBEntry *e = &rt->entries[i];
+        if ((e->flags & 1) &&               /* V bit */
+            e->gid == gid &&                /* GID match */
+            gpa >= e->gpa_start &&
+            gpa < e->gpa_end) {
+            uint64_t offset = gpa - e->gpa_start;
+            return e->hpa + offset;
+        }
+    }
+    return ~0ULL; /* Miss */
+}
+
+/*
+ * Insert a Root TLB entry with round-robin replacement.
+ */
+static void root_tlb_insert(CPULoongArchState *env,
+                             uint64_t gpa_start, uint64_t gpa_end,
+                             uint64_t hpa, uint32_t ps,
+                             uint64_t gid, uint32_t flags)
+{
+    LoongArchRootTLBState *rt = &env->root_tlb;
+    int idx;
+
+    if (rt->count < LOONGARCH_ROOT_TLB_SIZE) {
+        idx = rt->count++;
+    } else {
+        idx = rt->next_victim;
+        rt->next_victim = (rt->next_victim + 1) % LOONGARCH_ROOT_TLB_SIZE;
+    }
+
+    LoongArchRootTLBEntry *e = &rt->entries[idx];
+    e->gpa_start = gpa_start;
+    e->gpa_end   = gpa_end;
+    e->hpa       = hpa;
+    e->ps        = ps;
+    e->gid       = gid;
+    e->flags     = flags;
+
+    /* Keep victim pointer moving in round-robin */
+    if (rt->count == LOONGARCH_ROOT_TLB_SIZE) {
+        rt->next_victim = (idx + 1) % LOONGARCH_ROOT_TLB_SIZE;
+    }
+}
+
+/*
+ * Flush (invalidate) the entire Root TLB.
+ * Called on VM entry (new guest context) or when the hypervisor
+ * switches partitions.
+ */
+void loongarch_root_tlb_flush(CPULoongArchState *env)
+{
+    LoongArchRootTLBState *rt = &env->root_tlb;
+    memset(rt->entries, 0, sizeof(rt->entries));
+    rt->count = 0;
+    rt->next_victim = 0;
+}
+
+/*
+ * Stage-2 page-table walker: reads the hypervisor's TLB refill table
+ * from guest-physical memory and caches the result in the Root TLB.
+ *
+ * The hypervisor stores its per-CPU tlb_refill_table PA in CSR_SAVE4.
+ * Each entry is a 64-bit value:
+ *   [63:0] = (HPA_PPN << 20) | flags  (0 if the page is not mapped)
+ *
+ * Returns HPA, or ~0ULL if the GPA is unmapped.
+ */
+static uint64_t root_tlb_walk_stage2(CPULoongArchState *env, uint64_t gpa,
+                                      uint64_t gid)
+{
+    uint64_t table_pa = env->CSR_SAVE[4];
+    if (!table_pa) {
+        return gpa & 0x0000FFFFFFFFFFFFULL; /* Identity fallback */
+    }
+
+    /* 1MB page index */
+    uint32_t page_idx = (uint32_t)(gpa >> 20);
+    if (page_idx >= 4096) {
+        return ~0ULL; /* GPA above 4 GB */
+    }
+
+    /* Read entry from guest-physical memory */
+    uint64_t entry;
+    cpu_physical_memory_read(table_pa + page_idx * 8, &entry, sizeof(entry));
+
+    if (!(entry & 1ULL)) {
+        return ~0ULL; /* Invalid */
+    }
+
+    /* Extract HPA, flags, and page offset */
+    uint64_t hpa_ppn = (entry >> 20) << 20;
+    uint32_t flags = entry & 0xFFFFF;
+    uint32_t ps = 20; /* 1MB page size */
+    uint64_t gpa_base = (uint64_t)page_idx << 20;
+    uint64_t gpa_end  = gpa_base + (1ULL << 20);
+
+    /* Populate root TLB cache */
+    root_tlb_insert(env, gpa_base, gpa_end, hpa_ppn, ps, gid, flags);
+
+    uint64_t gpa_offset = gpa & 0xFFFFFULL;
+    return hpa_ppn + gpa_offset;
+}
+
 /*
  * LVZ: Translate Guest Physical Address to Host Physical Address.
- * In the current implementation, this is an identity mapping since
- * the hypervisor configures the partition memory as 1:1.
- * When root TLB (Stage-2) is implemented, this function will
- * perform a full G-stage translation.
+ *
+ * Checks the Root TLB first (with GID match), then falls back to the
+ * stage-2 page-table walker on miss.  The result is cached for future
+ * lookups.
+ */
+uint64_t loongarch_root_tlb_translate(CPULoongArchState *env, uint64_t gpa)
+{
+    uint64_t gid = FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, GID);
+
+    /* Fast path: Root TLB hit */
+    uint64_t hpa = root_tlb_lookup(env, gpa, gid);
+    if (hpa != ~0ULL) {
+        return hpa;
+    }
+
+    /* Slow path: walk stage-2 page tables */
+    hpa = root_tlb_walk_stage2(env, gpa, gid);
+
+    /* On miss, return GPA identity as a fallback
+     * (avoids crashing early-boot guests that touch unmapped GPA) */
+    if (hpa == ~0ULL) {
+        hpa = gpa & 0x0000FFFFFFFFFFFFULL;
+    }
+
+    return hpa;
+}
+
+/*
+ * LVZ: Translate Guest Physical Address to Host Physical Address.
+ * (wrapper for use by lvz_translate_tlbelo)
  */
 static uint64_t lvz_gpa_to_hpa(CPULoongArchState *env, uint64_t gpa)
 {
-    /* Identity mapping: GPA == HPA for partition memory.
-     * The hypervisor's tlb_refill_table maps partition GPAs to HPAs
-     * at 1MB granularity. For now, we trust the hypervisor's setup. */
-    return gpa & 0x0000FFFFFFFFFFFFULL;
+    return loongarch_root_tlb_translate(env, gpa);
 }
 
 /*

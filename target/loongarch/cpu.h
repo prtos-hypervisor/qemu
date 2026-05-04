@@ -295,6 +295,36 @@ struct LoongArchTLB {
     uint64_t tlb_entry1;
 };
 typedef struct LoongArchTLB LoongArchTLB;
+
+/*
+ * Root TLB for stage-2 (GPA->HPA) translation.
+ *
+ * In LoongArch LVZ, the root TLB is a separate TLB hierarchy that
+ * translates Guest Physical Addresses (GPA) to Host Physical Addresses
+ * (HPA).  Entries are tagged with a Guest ID (GID) so that different
+ * guest partitions can share the same root TLB structure without
+ * leaking address mappings across VM boundaries.
+ *
+ * The root TLB is much smaller than the primary TLB (64 entries is
+ * typical for hardware) and is backed by a software page-table walker
+ * that reads the hypervisor's stage-2 page tables from guest memory.
+ */
+#define LOONGARCH_ROOT_TLB_SIZE  64
+
+typedef struct {
+    uint64_t gpa_start;   /* Guest Physical Address page-aligned start */
+    uint64_t gpa_end;     /* Guest Physical Address end (exclusive) */
+    uint64_t hpa;         /* Host Physical Address page-aligned base */
+    uint64_t gid;         /* Guest ID (GSTAT.GID at VM entry) */
+    uint32_t ps;          /* Page-size encoding (same as TLBIDX.PS) */
+    uint32_t flags;       /* V(0), D(1), PLV(2:3), MAT(4:5), G(6) */
+} LoongArchRootTLBEntry;
+
+typedef struct {
+    LoongArchRootTLBEntry entries[LOONGARCH_ROOT_TLB_SIZE];
+    int next_victim;       /* Round-robin replacement pointer */
+    int count;             /* Number of valid entries */
+} LoongArchRootTLBState;
 #endif
 
 enum loongarch_features {
@@ -466,6 +496,8 @@ typedef struct CPUArchState {
 #ifndef CONFIG_USER_ONLY
 #ifdef CONFIG_TCG
     LoongArchTLB  tlb[LOONGARCH_TLB_MAX];
+    /* Root TLB for stage-2 GPA->HPA translation (LVZ) */
+    LoongArchRootTLBState root_tlb;
 #endif
 
     AddressSpace *address_space_iocsr;

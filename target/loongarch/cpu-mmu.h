@@ -48,6 +48,10 @@ static inline bool pte_present(CPULoongArchState *env, uint64_t entry)
     return !!present;
 }
 
+/* LVZ Root TLB (stage-2) API */
+void loongarch_root_tlb_flush(CPULoongArchState *env);
+uint64_t loongarch_root_tlb_translate(CPULoongArchState *env, uint64_t gpa);
+
 static inline bool pte_write(CPULoongArchState *env, uint64_t entry)
 {
     uint8_t writable;

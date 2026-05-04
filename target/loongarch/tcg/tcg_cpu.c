@@ -95,6 +95,7 @@ void loongarch_lvz_vm_exit(CPULoongArchState *env)
 /*
  * LVZ: VM entry - transition from host mode to guest (PVM) mode.
  * Set PVM and the cached in_guest_mode flag.
+ * Flush the primary TLB (MMU index switch) and root TLB (new guest).
  */
 void loongarch_lvz_vm_entry(CPULoongArchState *env)
 {
@@ -102,6 +103,8 @@ void loongarch_lvz_vm_entry(CPULoongArchState *env)
     env->in_guest_mode = true;
     /* Flush TLB to switch from host MMU indices to guest */
     tlb_flush(env_cpu(env));
+    /* Reset root TLB for the new guest context */
+    loongarch_root_tlb_flush(env);
 }
 
 static void loongarch_cpu_do_interrupt(CPUState *cs)
