@@ -105,6 +105,35 @@ uint64_t helper_rdtime_d(CPULoongArchState *env)
 void helper_ertn(CPULoongArchState *env)
 {
     uint64_t csr_pplv, csr_pie;
+
+    /*
+     * LVZ: When in guest (PVM) mode, use guest shadow CSRs for the
+     * ERTN so the guest returns to its own saved PC/PLV rather than
+     * the host's stale values.  Entering guest mode (host -> guest)
+     * still uses the host CSRs because in_guest_mode is false until
+     * loongarch_lvz_vm_entry() sets it below.
+     */
+    if (env->in_guest_mode) {
+        if (FIELD_EX64(env->guest.CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
+            csr_pplv = FIELD_EX64(env->guest.CSR_TLBRPRMD, CSR_TLBRPRMD, PPLV);
+            csr_pie = FIELD_EX64(env->guest.CSR_TLBRPRMD, CSR_TLBRPRMD, PIE);
+            set_pc(env, env->guest.CSR_TLBRERA);
+            env->guest.CSR_TLBRERA = FIELD_DP64(env->guest.CSR_TLBRERA,
+                                                CSR_TLBRERA, ISTLBR, 0);
+        } else {
+            csr_pplv = FIELD_EX64(env->guest.CSR_PRMD, CSR_PRMD, PPLV);
+            csr_pie = FIELD_EX64(env->guest.CSR_PRMD, CSR_PRMD, PIE);
+            set_pc(env, env->guest.CSR_ERA);
+        }
+        /* Use guest CRMD for PLV/IE update */
+        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD,
+                                         PLV, csr_pplv);
+        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD,
+                                         IE, csr_pie);
+        env->lladdr = 1;
+        return;
+    }
+
     if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
         csr_pplv = FIELD_EX64(env->CSR_TLBRPRMD, CSR_TLBRPRMD, PPLV);
         csr_pie = FIELD_EX64(env->CSR_TLBRPRMD, CSR_TLBRPRMD, PIE);
