@@ -164,25 +164,46 @@ static void sptw_prepare_context(CPULoongArchState *env, MMUContext *context)
 {
     uint64_t lo0, lo1, csr_vppn;
     uint8_t csr_ps;
+    uint64_t tlbrera, tlbrehi, tlbehi, tlbidx, tlbrelo0, tlbrelo1, tlbelo0, tlbelo1;
 
-    if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
-        csr_ps = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI, PS);
-        if (is_la64(env)) {
-            csr_vppn = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI_64, VPPN);
-        } else {
-            csr_vppn = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI_32, VPPN);
-        }
-        lo0 = env->CSR_TLBRELO0;
-        lo1 = env->CSR_TLBRELO1;
+    if (env->in_guest_mode) {
+        tlbrera = env->guest.CSR_TLBRERA;
+        tlbrehi = env->guest.CSR_TLBREHI;
+        tlbehi  = env->guest.CSR_TLBEHI;
+        tlbidx  = env->guest.CSR_TLBIDX;
+        tlbrelo0 = env->guest.CSR_TLBRELO0;
+        tlbrelo1 = env->guest.CSR_TLBRELO1;
+        tlbelo0  = env->guest.CSR_TLBELO0;
+        tlbelo1  = env->guest.CSR_TLBELO1;
     } else {
-        csr_ps = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, PS);
+        tlbrera = env->CSR_TLBRERA;
+        tlbrehi = env->CSR_TLBREHI;
+        tlbehi  = env->CSR_TLBEHI;
+        tlbidx  = env->CSR_TLBIDX;
+        tlbrelo0 = env->CSR_TLBRELO0;
+        tlbrelo1 = env->CSR_TLBRELO1;
+        tlbelo0  = env->CSR_TLBELO0;
+        tlbelo1  = env->CSR_TLBELO1;
+    }
+
+    if (FIELD_EX64(tlbrera, CSR_TLBRERA, ISTLBR)) {
+        csr_ps = FIELD_EX64(tlbrehi, CSR_TLBREHI, PS);
         if (is_la64(env)) {
-            csr_vppn = FIELD_EX64(env->CSR_TLBEHI, CSR_TLBEHI_64, VPPN);
+            csr_vppn = FIELD_EX64(tlbrehi, CSR_TLBREHI_64, VPPN);
         } else {
-            csr_vppn = FIELD_EX64(env->CSR_TLBEHI, CSR_TLBEHI_32, VPPN);
+            csr_vppn = FIELD_EX64(tlbrehi, CSR_TLBREHI_32, VPPN);
         }
-        lo0 = env->CSR_TLBELO0;
-        lo1 = env->CSR_TLBELO1;
+        lo0 = tlbrelo0;
+        lo1 = tlbrelo1;
+    } else {
+        csr_ps = FIELD_EX64(tlbidx, CSR_TLBIDX, PS);
+        if (is_la64(env)) {
+            csr_vppn = FIELD_EX64(tlbehi, CSR_TLBEHI_64, VPPN);
+        } else {
+            csr_vppn = FIELD_EX64(tlbehi, CSR_TLBEHI_32, VPPN);
+        }
+        lo0 = tlbelo0;
+        lo1 = tlbelo1;
     }
 
     context->ps = csr_ps;
@@ -425,10 +446,17 @@ static void lvz_translate_tlbelo(CPULoongArchState *env,
 
 void helper_tlbwr(CPULoongArchState *env)
 {
-    int index = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, INDEX);
+    uint64_t tlbidx;
+    if (env->in_guest_mode) {
+        tlbidx = env->guest.CSR_TLBIDX;
+    } else {
+        tlbidx = env->CSR_TLBIDX;
+    }
+    int index = FIELD_EX64(tlbidx, CSR_TLBIDX, INDEX);
+
     MMUContext context;
 
-    if (FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, NE)) {
+    if (FIELD_EX64(tlbidx, CSR_TLBIDX, NE)) {
         invalidate_tlb(env, index);
         return;
     }
@@ -509,14 +537,26 @@ void helper_tlbfill(CPULoongArchState *env)
     int index, pagesize;
     MMUContext context;
 
-    if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
-        entryhi = env->CSR_TLBREHI;
-        /* Validity of pagesize is checked in helper_ldpte() */
-        pagesize = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI, PS);
+    /*
+     * LVZ guest mode: read from guest shadow CSRs so the guest's
+     * TLB management instructions use guest GPA->HPA translation.
+     */
+    if (env->in_guest_mode) {
+        if (FIELD_EX64(env->guest.CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
+            entryhi = env->guest.CSR_TLBREHI;
+            pagesize = FIELD_EX64(env->guest.CSR_TLBREHI, CSR_TLBREHI, PS);
+        } else {
+            entryhi = env->guest.CSR_TLBEHI;
+            pagesize = FIELD_EX64(env->guest.CSR_TLBIDX, CSR_TLBIDX, PS);
+        }
     } else {
-        entryhi = env->CSR_TLBEHI;
-        /* Validity of pagesize is checked in helper_tlbrd() */
-        pagesize = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, PS);
+        if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
+            entryhi = env->CSR_TLBREHI;
+            pagesize = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI, PS);
+        } else {
+            entryhi = env->CSR_TLBEHI;
+            pagesize = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, PS);
+        }
     }
 
     sptw_prepare_context(env, &context);

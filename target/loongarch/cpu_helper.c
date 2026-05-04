@@ -310,9 +310,16 @@ TLBRet get_physical_address(CPULoongArchState *env, MMUContext *context,
     int kernel_mode = mmu_idx == MMU_KERNEL_IDX;
     uint32_t plv, base_c, base_v;
     int64_t addr_high;
-    uint8_t da = FIELD_EX64(env->CSR_CRMD, CSR_CRMD, DA);
-    uint8_t pg = FIELD_EX64(env->CSR_CRMD, CSR_CRMD, PG);
+    uint8_t da, pg;
     vaddr address;
+
+    if (env->in_guest_mode) {
+        da = FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, DA);
+        pg = FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PG);
+    } else {
+        da = FIELD_EX64(env->CSR_CRMD, CSR_CRMD, DA);
+        pg = FIELD_EX64(env->CSR_CRMD, CSR_CRMD, PG);
+    }
 
     /* Check PG and DA */
     address = context->addr;
@@ -329,18 +336,26 @@ TLBRet get_physical_address(CPULoongArchState *env, MMUContext *context,
     } else {
         base_v = address >> R_CSR_DMW_32_VSEG_SHIFT;
     }
-    /* Check direct map window */
-    for (int i = 0; i < 4; i++) {
-        if (is_la64(env)) {
-            base_c = FIELD_EX64(env->CSR_DMW[i], CSR_DMW_64, VSEG);
-        } else {
-            base_c = FIELD_EX64(env->CSR_DMW[i], CSR_DMW_32, VSEG);
-        }
-        if ((plv & env->CSR_DMW[i]) && (base_c == base_v)) {
-            context->physical = dmw_va2pa(env, address, env->CSR_DMW[i]);
-            context->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-            context->mmu_index = MMU_DA_IDX;
-            return TLBRET_MATCH;
+    /* Check direct map window - guest DMW first, then host DMW fallback */
+    for (int pass = 0; pass < (env->in_guest_mode ? 2 : 1); pass++) {
+        for (int i = 0; i < 4; i++) {
+            uint64_t dmw_val;
+            if (env->in_guest_mode && pass == 0) {
+                dmw_val = env->guest.CSR_DMW[i];
+            } else {
+                dmw_val = env->CSR_DMW[i];
+            }
+            if (is_la64(env)) {
+                base_c = FIELD_EX64(dmw_val, CSR_DMW_64, VSEG);
+            } else {
+                base_c = FIELD_EX64(dmw_val, CSR_DMW_32, VSEG);
+            }
+            if ((plv & dmw_val) && (base_c == base_v)) {
+                context->physical = dmw_va2pa(env, address, dmw_val);
+                context->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+                context->mmu_index = MMU_DA_IDX;
+                return TLBRET_MATCH;
+            }
         }
     }
 
