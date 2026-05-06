@@ -121,6 +121,14 @@ target_ulong helper_csrwr_tcfg(CPULoongArchState *env, target_ulong val)
 {
     LoongArchCPU *cpu = env_archcpu(env);
     int64_t old_v = env->CSR_TCFG;
+    static int tcfg_helper_count = 0;
+    tcfg_helper_count++;
+    if (tcfg_helper_count <= 5) {
+        fprintf(stderr, "[TCFG_HELPER] #%d val=%lx pc=%lx guest=%d\n",
+                tcfg_helper_count, (unsigned long)val,
+                (unsigned long)env->pc, env->in_guest_mode);
+        fflush(stderr);
+    }
 
     cpu_loongarch_store_constant_timer_config(cpu, val);
 

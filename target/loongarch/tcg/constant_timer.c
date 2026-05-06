@@ -12,6 +12,8 @@
 #include "cpu-csr.h"
 
 #define TIMER_PERIOD                10 /* 10 ns period for 100 MHz frequency */
+
+
 #define CONSTANT_TIMER_TICK_MASK    0xfffffffffffcUL
 #define CONSTANT_TIMER_ENABLE       0x1UL
 
@@ -35,6 +37,7 @@ void cpu_loongarch_store_constant_timer_config(LoongArchCPU *cpu,
 {
     CPULoongArchState *env = &cpu->env;
     uint64_t now, next;
+
 
     env->CSR_TCFG = value;
     if (value & CONSTANT_TIMER_ENABLE) {

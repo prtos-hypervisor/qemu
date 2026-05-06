@@ -13,6 +13,7 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/cpu-ops.h"
 #include "exec/translation-block.h"
+#include "exec/tb-flush.h"
 #include "exec/target_page.h"
 #include "tcg_loongarch.h"
 #include "internals.h"
@@ -86,8 +87,10 @@ void G_NORETURN do_raise_exception(CPULoongArchState *env,
  */
 void loongarch_lvz_vm_exit(CPULoongArchState *env)
 {
+    CPUState *cs = env_cpu(env);
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 0);
     env->in_guest_mode = false;
+    cs->tcg_cflags &= ~CF_NO_GOTO_TB;
     /* Save guest CNTC view: guest_cntc = host_cntc - offset */
     env->guest.CSR_CNTC = env->CSR_CNTC - env->guest_timer_offset;
     /*
@@ -106,12 +109,42 @@ void loongarch_lvz_vm_exit(CPULoongArchState *env)
  */
 void loongarch_lvz_vm_entry(CPULoongArchState *env)
 {
+    CPUState *cs = env_cpu(env);
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 1);
     env->in_guest_mode = true;
-    /* Flush TLB to switch from host MMU indices to guest */
-    tlb_flush(env_cpu(env));
-    /* Reset root TLB for the new guest context */
-    loongarch_root_tlb_flush(env);
+    env->guest_tb_count = 0;
+    /*
+     * Disable TB chaining in guest mode to ensure timer interrupts
+     * (delivered via cpu_interrupt from iothread) are promptly processed.
+     * Without this, a self-looping TB may chain via goto_tb and the
+     * icount_decr exit check at TB start races with the kick.
+     */
+    cs->tcg_cflags |= CF_NO_GOTO_TB;
+    /*
+     * Flush the TB jmp cache so that any TBs previously translated
+     * without CF_NO_GOTO_TB are discarded. Otherwise, cached TBs with
+     * goto_tb chains would be reused, bypassing the interrupt check.
+     */
+    tcg_flush_jmp_cache(cs);
+    /*
+     * Initialize guest CRMD to DA mode (Direct Addressing) on first entry.
+     * The hypervisor manages guest CRMD in software and syncs via GCSRWR,
+     * but the initial boot state requires DA=1 for the first instruction
+     * fetch to succeed (before any GSPR trap can sync the value).
+     */
+    if (env->guest.CSR_CRMD == 0) {
+        env->guest.CSR_CRMD = FIELD_DP64(0, CSR_CRMD, DA, 1);
+    }
+    /*
+     * Flush softmmu TLB only when guest is entering DA mode.
+     * Host always runs in PG mode; DA-mode entries (VA=PA) would conflict.
+     * When guest re-enters PG mode (most common path), host and guest share
+     * the same DMW config so cached translations remain valid.
+     */
+    if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, DA)) {
+        extern void tlb_flush(CPUState *cpu);
+        tlb_flush(env_cpu(env));
+    }
     /*
      * GCNT offset: the guest's view of CNTC starts at the current host
      * counter value minus whatever the guest has already written to
@@ -231,6 +264,8 @@ static void loongarch_cpu_do_interrupt(CPUState *cs)
         case EXCCODE_INE:
         case EXCCODE_FPD:
         case EXCCODE_FPE:
+        case EXCCODE_SXD:
+        case EXCCODE_ASXD:
         case EXCCODE_PIL:
         case EXCCODE_PIS:
         case EXCCODE_PIF:
@@ -245,56 +280,137 @@ static void loongarch_cpu_do_interrupt(CPUState *cs)
                 delegate_to_guest = true;
             }
             break;
-        case EXCCODE_INT:
-            /* Delegate timer interrupt if GCFG.TIT is clear */
-            if (!(gcfg & (1ULL << 9))) {
-                delegate_to_guest = true;
-            }
+        case EXCCODE_INT: {
+            /* TIT (bit 9) controls whether timer interrupt traps to host.
+             * For our emulation with GCFG.TIT=1:
+             *   - Timer interrupts (IS bit 11): cause VM exit (not delegated)
+             *   - Other interrupts (IPI, HWI): also cause VM exit.
+             *     The host hypervisor (PRTOS) handles all interrupts and
+             *     injects virtual interrupts to the guest as needed.
+             *
+             * The guest receives interrupts only through virtual injection
+             * (host sets guest ESTAT bits and re-enters guest with IE=1).
+             * Direct delegation would bypass the host's interrupt management.
+             */
+            /* All interrupts cause VM exit — delegate_to_guest stays false */
             break;
+        }
         default:
             /* GSPR, HVC, GCM always cause VM exit */
             break;
         }
 
         if (delegate_to_guest) {
-            /* Inject exception directly into guest:
-             * Save guest state to guest CSRs and jump to guest EENTRY */
-            uint64_t guest_eentry = env->guest.CSR_EENTRY;
-            if (guest_eentry) {
-                /* Save current guest PC and PLV/IE to guest PRMD/ERA */
-                env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
-                    CSR_PRMD, PPLV,
-                    FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
-                env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
-                    CSR_PRMD, PIE,
-                    FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
-                env->guest.CSR_ERA = env->pc;
+            if (tlbfill) {
+                /* TLB Refill delegation: route to guest TLBRENTRY.
+                 * TORU (bit 11) controls whether refills trap to host.
+                 * If TORU=0, delegate refill to guest. */
+                if (!(gcfg & (1ULL << 11))) {
+                    uint64_t guest_tlbrentry = env->guest.CSR_TLBRENTRY;
+                    if (guest_tlbrentry) {
+                        /* Save state to TLB refill CSRs */
+                        env->guest.CSR_TLBRPRMD = FIELD_DP64(
+                            env->guest.CSR_TLBRPRMD, CSR_TLBRPRMD, PPLV,
+                            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
+                        env->guest.CSR_TLBRPRMD = FIELD_DP64(
+                            env->guest.CSR_TLBRPRMD, CSR_TLBRPRMD, PIE,
+                            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
+                        env->guest.CSR_TLBRERA = FIELD_DP64(
+                            env->guest.CSR_TLBRERA, CSR_TLBRERA,
+                            PC, (env->pc >> 2));
+                        env->guest.CSR_TLBRERA = FIELD_DP64(
+                            env->guest.CSR_TLBRERA, CSR_TLBRERA, ISTLBR, 1);
+                        env->guest.CSR_TLBRBADV = env->CSR_TLBRBADV;
+                        if (is_la64(env)) {
+                            env->guest.CSR_TLBREHI = FIELD_DP64(
+                                env->guest.CSR_TLBREHI, CSR_TLBREHI_64,
+                                VPPN, extract64(env->CSR_TLBRBADV, 13, 35));
+                        }
+                        /* Set guest CRMD: DA=1, PG=0, PLV=0, IE=0 */
+                        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                            CSR_CRMD, DA, 1);
+                        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                            CSR_CRMD, PG, 0);
+                        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                            CSR_CRMD, PLV, 0);
+                        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                            CSR_CRMD, IE, 0);
 
-                /* Set guest exception info */
-                env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT,
-                    CSR_ESTAT, ECODE, EXCODE_MCODE(cs->exception_index));
-                env->guest.CSR_BADV = env->CSR_BADV;
+                        env->pc = guest_tlbrentry;
+                        /* Clear ISTLBR in host CSR since we handled it */
+                        env->CSR_TLBRERA = FIELD_DP64(env->CSR_TLBRERA,
+                            CSR_TLBRERA, ISTLBR, 0);
+                        cs->exception_index = -1;
+                        return;
+                    }
+                }
+                /* TORU=1 or no guest_tlbrentry: fall through to VM exit */
+            } else {
+                /* Normal exception/interrupt delegation: route to guest EENTRY */
+                uint64_t guest_eentry = env->guest.CSR_EENTRY;
+                if (guest_eentry) {
+                    /* Save current guest PC and PLV/IE to guest PRMD/ERA */
+                    env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
+                        CSR_PRMD, PPLV,
+                        FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
+                    env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
+                        CSR_PRMD, PIE,
+                        FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
+                    env->guest.CSR_ERA = env->pc;
 
-                /* Update guest CRMD: PLV=0, IE=0 */
-                env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
-                    CSR_CRMD, PLV, 0);
-                env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
-                    CSR_CRMD, IE, 0);
+                    /* Update guest CRMD: PLV=0, IE=0 */
+                    env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                        CSR_CRMD, PLV, 0);
+                    env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                        CSR_CRMD, IE, 0);
 
-                /* Jump to guest exception handler */
-                uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
-                uint32_t gvec_size = gvs ? (1 << gvs) * 4 : 0;
-                env->pc = guest_eentry +
-                    EXCODE_MCODE(cs->exception_index) * gvec_size;
+                    /* Compute target PC based on exception type */
+                    uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG,
+                                             CSR_ECFG, VS);
+                    uint32_t gvec_size = gvs ? (1 << gvs) * 4 : 0;
 
-                /* Stay in guest mode */
-                cs->exception_index = -1;
-                return;
+                    if (cs->exception_index == EXCCODE_INT) {
+                        /* Interrupt: use vectored interrupt entry.
+                         * Vector = EXCCODE_EXTERNAL_INT + highest_irq_bit */
+                        uint32_t gpending = FIELD_EX64(env->guest.CSR_ESTAT,
+                                                      CSR_ESTAT, IS);
+                        gpending &= FIELD_EX64(env->guest.CSR_ECFG,
+                                              CSR_ECFG, LIE);
+                        if (gpending) {
+                            uint32_t vector = 31 - __builtin_clz(gpending);
+                            env->pc = guest_eentry +
+                                (EXCCODE_EXTERNAL_INT + vector) * gvec_size;
+                        } else {
+                            env->pc = guest_eentry;
+                        }
+                    } else {
+                        /* Synchronous exception */
+                        env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT,
+                            CSR_ESTAT, ECODE,
+                            EXCODE_MCODE(cs->exception_index));
+                        env->guest.CSR_BADV = env->CSR_BADV;
+
+                        /* Set TLBEHI for page-related exceptions */
+                        if (EXCODE_MCODE(cs->exception_index) >= 1 &&
+                            EXCODE_MCODE(cs->exception_index) <= 6) {
+                            env->guest.CSR_TLBEHI = env->CSR_BADV &
+                                (TARGET_PAGE_MASK << 1);
+                        }
+
+                        env->pc = guest_eentry +
+                            EXCODE_MCODE(cs->exception_index) * gvec_size;
+                    }
+
+                    /* Stay in guest mode */
+                    cs->exception_index = -1;
+                    return;
+                }
             }
         }
 
         /* Not delegated: VM Exit to host hypervisor */
         env->in_guest_mode = false;
+        cs->tcg_cflags &= ~CF_NO_GOTO_TB;
     }
 
     /* Save PLV and IE */
@@ -402,6 +518,29 @@ static bool loongarch_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPULoongArchState *env = cpu_env(cs);
 
+        /*
+         * In guest (PVM) mode, only deliver interrupts when the GUEST has
+         * interrupts enabled (guest CRMD.IE=1). This prevents interrupts
+         * from being dispatched before the guest's secondary CPU boot code
+         * has set up its exception vectors. The interrupt stays pending and
+         * will be delivered once the guest enables IE.
+         *
+         * On real hardware, external interrupts always cause VM exit
+         * regardless of guest IE. But the host hypervisor would then
+         * hold the interrupt pending and only inject a virtual interrupt
+         * into the guest when the guest has IE=1. We emulate this behavior
+         * by gating delivery on guest IE.
+         */
+        if (env->in_guest_mode) {
+            if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
+                cpu_loongarch_hw_interrupts_pending(env)) {
+                cs->exception_index = EXCCODE_INT;
+                loongarch_cpu_do_interrupt(cs);
+                return true;
+            }
+            return false;
+        }
+
         if (cpu_loongarch_hw_interrupts_enabled(env) &&
             cpu_loongarch_hw_interrupts_pending(env)) {
             /* Raise it */
@@ -424,11 +563,20 @@ static TCGTBCPUState loongarch_get_tb_cpu_state(CPUState *cs)
 {
     CPULoongArchState *env = cpu_env(cs);
     uint32_t flags;
+    uint64_t crmd, euen;
 
-    flags = env->CSR_CRMD & (R_CSR_CRMD_PLV_MASK | R_CSR_CRMD_PG_MASK);
-    flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, FPE) * HW_FLAGS_EUEN_FPE;
-    flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, SXE) * HW_FLAGS_EUEN_SXE;
-    flags |= FIELD_EX64(env->CSR_EUEN, CSR_EUEN, ASXE) * HW_FLAGS_EUEN_ASXE;
+    if (env->in_guest_mode) {
+        crmd = env->guest.CSR_CRMD;
+        euen = env->guest.CSR_EUEN;
+    } else {
+        crmd = env->CSR_CRMD;
+        euen = env->CSR_EUEN;
+    }
+
+    flags = crmd & (R_CSR_CRMD_PLV_MASK | R_CSR_CRMD_PG_MASK);
+    flags |= FIELD_EX64(euen, CSR_EUEN, FPE) * HW_FLAGS_EUEN_FPE;
+    flags |= FIELD_EX64(euen, CSR_EUEN, SXE) * HW_FLAGS_EUEN_SXE;
+    flags |= FIELD_EX64(euen, CSR_EUEN, ASXE) * HW_FLAGS_EUEN_ASXE;
     flags |= is_va32(env) * HW_FLAGS_VA32;
     flags |= env->in_guest_mode * HW_FLAGS_PVM;
 

@@ -136,6 +136,7 @@ DEF_HELPER_4(lddir, tl, env, tl, i32, i32)
 DEF_HELPER_4(ldpte, void, env, tl, tl, i32)
 DEF_HELPER_1(ertn, void, env)
 DEF_HELPER_1(idle, void, env)
+DEF_HELPER_1(check_timer_irq, void, env)
 #endif
 
 /* LoongArch LSX  */

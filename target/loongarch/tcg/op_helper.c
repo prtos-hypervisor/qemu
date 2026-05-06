@@ -7,6 +7,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "cpu.h"
 #include "qemu/host-utils.h"
 #include "exec/helper-proto.h"
@@ -15,6 +16,11 @@
 #include "qemu/crc32c.h"
 #include <zlib.h> /* for crc32 */
 #include "cpu-csr.h"
+#include "exec/cputlb.h"
+
+#define CONSTANT_TIMER_ENABLE 0x1UL
+#define CONSTANT_TIMER_TICK_MASK 0xfffffffffffcUL
+#define TIMER_PERIOD 10
 
 /* Exceptions helpers */
 void helper_raise_exception(CPULoongArchState *env, uint32_t exception)
@@ -114,12 +120,19 @@ void helper_ertn(CPULoongArchState *env)
      * loongarch_lvz_vm_entry() sets it below.
      */
     if (env->in_guest_mode) {
+        uint8_t old_da = FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, DA);
         if (FIELD_EX64(env->guest.CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
             csr_pplv = FIELD_EX64(env->guest.CSR_TLBRPRMD, CSR_TLBRPRMD, PPLV);
             csr_pie = FIELD_EX64(env->guest.CSR_TLBRPRMD, CSR_TLBRPRMD, PIE);
-            set_pc(env, env->guest.CSR_TLBRERA);
+            /* Clear ISTLBR bit before using as return PC (bit 0 is flag) */
             env->guest.CSR_TLBRERA = FIELD_DP64(env->guest.CSR_TLBRERA,
                                                 CSR_TLBRERA, ISTLBR, 0);
+            set_pc(env, env->guest.CSR_TLBRERA);
+            /* Transition from DA mode back to PG mode */
+            env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                                             CSR_CRMD, DA, 0);
+            env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                                             CSR_CRMD, PG, 1);
         } else {
             csr_pplv = FIELD_EX64(env->guest.CSR_PRMD, CSR_PRMD, PPLV);
             csr_pie = FIELD_EX64(env->guest.CSR_PRMD, CSR_PRMD, PIE);
@@ -130,6 +143,11 @@ void helper_ertn(CPULoongArchState *env)
                                          PLV, csr_pplv);
         env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD,
                                          IE, csr_pie);
+        /* Flush TLB on DA/PG mode transitions (DA→PG or PG→DA) */
+        uint8_t new_da = FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, DA);
+        if (old_da != new_da) {
+            tlb_flush(env_cpu(env));
+        }
         env->lladdr = 1;
         return;
     }
@@ -174,5 +192,56 @@ void helper_idle(CPULoongArchState *env)
 
     cs->halted = 1;
     do_raise_exception(env, EXCP_HLT, 0);
+}
+
+/*
+ * Synchronous interrupt/timer check for guest-mode vCPUs.
+ * Called at TB start when in PVM (guest) mode.
+ *
+ * Handles two cases:
+ * 1) interrupt_request already set by iothread → deliver immediately.
+ * 2) Timer expired but iothread hasn't delivered yet (MTTCG race) →
+ *    set interrupt directly. Don't re-arm; the iothread callback will
+ *    handle that when it fires (the expired deadline triggers it
+ *    on the next main loop iteration).
+ */
+void helper_check_timer_irq(CPULoongArchState *env)
+{
+    CPUState *cs = env_cpu(env);
+    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
+
+    /* Fast path: interrupt already pending — only deliver if guest IE=1 */
+    if (qatomic_read(&cs->interrupt_request) & CPU_INTERRUPT_HARD) {
+        if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE)) {
+            cs->exception_index = EXCCODE_INT;
+            cpu_loop_exit(cs);
+        }
+        /* IE=0: hold the interrupt pending until guest enables interrupts */
+    }
+
+    /* Check timer expiry directly — only for secondary vCPUs.
+     * CPU0's timer delivery via the iothread works reliably; applying
+     * this check to CPU0 interferes with its normal timer management. */
+    if (cs->cpu_index != 0 && (env->CSR_TCFG & CONSTANT_TIMER_ENABLE)) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        int64_t expire = timer_expire_time_ns(&cpu->timer);
+        if (expire != -1 && now >= expire) {
+            env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 1);
+            qatomic_or(&cs->interrupt_request, CPU_INTERRUPT_HARD);
+
+            /* Re-arm periodic timer */
+            if (FIELD_EX64(env->CSR_TCFG, CSR_TCFG, PERIODIC)) {
+                int64_t next = now + (env->CSR_TCFG & CONSTANT_TIMER_TICK_MASK)
+                               * TIMER_PERIOD;
+                timer_mod(&cpu->timer, next);
+            } else {
+                env->CSR_TCFG = FIELD_DP64(env->CSR_TCFG, CSR_TCFG, EN, 0);
+                timer_del(&cpu->timer);
+            }
+
+            cs->exception_index = EXCCODE_INT;
+            cpu_loop_exit(cs);
+        }
+    }
 }
 #endif

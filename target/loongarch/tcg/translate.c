@@ -155,6 +155,18 @@ static void loongarch_tr_init_disas_context(DisasContextBase *dcbase,
 
 static void loongarch_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
 {
+    DisasContext *ctx = container_of(dcbase, DisasContext, base);
+    /*
+     * In guest (PVM) mode, check for pending interrupts at TB start.
+     * With CF_NO_GOTO_TB already set for guest mode, each TB boundary
+     * goes through cpu_handle_interrupt. This helper additionally catches
+     * the case where interrupt_request was set by the iothread but the
+     * cpu_exec loop hasn't processed it yet (e.g., at the very first TB
+     * after ERTN into guest mode).
+     */
+    if (ctx->pvm) {
+        gen_helper_check_timer_irq(tcg_env);
+    }
 }
 
 static void loongarch_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)

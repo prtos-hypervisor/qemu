@@ -314,6 +314,12 @@ TLBRet get_physical_address(CPULoongArchState *env, MMUContext *context,
     vaddr address;
 
     if (env->in_guest_mode) {
+        /*
+         * In guest mode, use GUEST CRMD for DA/PG.
+         * The guest's TLB refill handler runs in DA mode (DA=1, PG=0),
+         * meaning all addresses are direct physical (VA=PA).  We must
+         * honor the guest's DA/PG to allow the refill handler to execute.
+         */
         da = FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, DA);
         pg = FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PG);
     } else {
@@ -336,7 +342,7 @@ TLBRet get_physical_address(CPULoongArchState *env, MMUContext *context,
     } else {
         base_v = address >> R_CSR_DMW_32_VSEG_SHIFT;
     }
-    /* Check direct map window - guest DMW first, then host DMW fallback */
+    /* Check direct map window - guest DMW first (written inline), then host */
     for (int pass = 0; pass < (env->in_guest_mode ? 2 : 1); pass++) {
         for (int i = 0; i < 4; i++) {
             uint64_t dmw_val;

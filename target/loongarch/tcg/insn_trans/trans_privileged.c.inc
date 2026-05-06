@@ -189,39 +189,18 @@ static int get_guest_csr_offset(unsigned int csr_num)
 static bool guest_csr_write_needs_trap(unsigned int csr_num)
 {
     switch (csr_num) {
-    /* Timer CSRs - hypervisor manages guest timer */
+    /* Timer CSRs - hypervisor manages guest timer deadline */
     case LOONGARCH_CSR_TCFG:
     case LOONGARCH_CSR_TICLR:
-    /* Exception/Interrupt CSRs - needed for ertn and IRQ delivery */
-    case LOONGARCH_CSR_ERA:
-    case LOONGARCH_CSR_PRMD:
+    /* EENTRY - hypervisor caches for trap delivery + updates part_ctrl_table */
     case LOONGARCH_CSR_EENTRY:
-    case LOONGARCH_CSR_ECFG:
-    case LOONGARCH_CSR_ESTAT:
-    case LOONGARCH_CSR_CRMD:
-    /* TLB management CSRs - needed for tlbfill/tlbwr GPA->HPA translation */
-    case LOONGARCH_CSR_TLBIDX:
-    case LOONGARCH_CSR_TLBEHI:
-    case LOONGARCH_CSR_TLBELO0:
-    case LOONGARCH_CSR_TLBELO1:
-    case LOONGARCH_CSR_ASID:
-    case LOONGARCH_CSR_STLBPS:
-    /* Page table walking CSRs - needed for LDDIR/LDPTE emulation */
-    case LOONGARCH_CSR_PGDL:
-    case LOONGARCH_CSR_PGDH:
-    case LOONGARCH_CSR_PWCL:
-    case LOONGARCH_CSR_PWCH:
-    /* TLB refill CSRs - must trap to protect host TLBRENTRY */
-    case LOONGARCH_CSR_TLBRENTRY:
-    case LOONGARCH_CSR_TLBRBADV:
-    case LOONGARCH_CSR_TLBRERA:
-    case LOONGARCH_CSR_TLBRSAVE:
-    case LOONGARCH_CSR_TLBRELO0:
-    case LOONGARCH_CSR_TLBRELO1:
-    case LOONGARCH_CSR_TLBREHI:
-    case LOONGARCH_CSR_TLBRPRMD:
+    /* EUEN - hypervisor must sync to real hardware FP/LASX enable bits */
+    case LOONGARCH_CSR_EUEN:
         return true;
     default:
+        /* CRMD, PRMD, ERA, ECFG, ESTAT go inline to guest shadow.
+         * Hypervisor reads them via GCSRRD when needed (interrupt
+         * delivery, exception emulation). */
         return false;
     }
 }
@@ -233,15 +212,12 @@ static bool guest_csr_write_needs_trap(unsigned int csr_num)
  */
 static bool guest_csr_read_needs_trap(unsigned int csr_num)
 {
-    switch (csr_num) {
-    case LOONGARCH_CSR_ESTAT:  /* Exception Status - hypervisor sets IS bits */
-    case LOONGARCH_CSR_ERA:    /* Exception Return Address - set by ertn */
-    case LOONGARCH_CSR_CRMD:   /* Current Mode - set by ertn */
-    case LOONGARCH_CSR_ECFG:   /* Exception Config - guest checks vs ESTAT */
-        return true;
-    default:
-        return false;
-    }
+    /* All CSR reads go inline to guest shadow.
+     * ESTAT: hypervisor updates guest.CSR_ESTAT IS bits via GCSRWR
+     * before returning to guest (check_guest_pending_irqs, timer handler).
+     * So the shadow value is always up-to-date when guest reads it. */
+    (void)csr_num;
+    return false;
 }
 
 static bool set_csr_trans_func(unsigned int csr_num, GenCSRRead readfn,
@@ -530,7 +506,7 @@ static bool trans_gcsrrd(DisasContext *ctx, arg_gcsrrd *a)
 
 static bool trans_gcsrwr(DisasContext *ctx, arg_gcsrwr *a)
 {
-    TCGv dest, src1;
+    TCGv dest, src1, newval;
 
     if (check_plv(ctx)) {
         return false;
@@ -543,10 +519,14 @@ static bool trans_gcsrwr(DisasContext *ctx, arg_gcsrwr *a)
     int guest_off = get_guest_csr_offset(a->csr);
     if (guest_off >= 0) {
         src1 = gpr_src(ctx, a->rd, EXT_NONE);
+        /* Save the new value in a temp BEFORE reading old value into dest,
+         * because dest and src1 may alias (same register). */
+        newval = tcg_temp_new();
+        tcg_gen_mov_tl(newval, src1);
         dest = gpr_dst(ctx, a->rd, EXT_NONE);
-        /* Return old value, store new value */
+        /* Return old value in rd, store new value to guest CSR */
         tcg_gen_ld_tl(dest, tcg_env, guest_off);
-        tcg_gen_st_tl(src1, tcg_env, guest_off);
+        tcg_gen_st_tl(newval, tcg_env, guest_off);
         gen_set_gpr(a->rd, dest, EXT_NONE);
         return true;
     }
@@ -654,6 +634,10 @@ static bool trans_tlbwr(DisasContext *ctx, arg_tlbwr *a)
     if (check_plv(ctx)) {
         return false;
     }
+    if (ctx->pvm) {
+        generate_exception(ctx, EXCCODE_GSPR);
+        return true;
+    }
     gen_helper_tlbwr(tcg_env);
     check_mmu_idx(ctx);
     return true;
@@ -663,6 +647,10 @@ static bool trans_tlbfill(DisasContext *ctx, arg_tlbfill *a)
 {
     if (check_plv(ctx)) {
         return false;
+    }
+    if (ctx->pvm) {
+        generate_exception(ctx, EXCCODE_GSPR);
+        return true;
     }
     gen_helper_tlbfill(tcg_env);
     check_mmu_idx(ctx);
@@ -769,9 +757,13 @@ static bool trans_lddir(DisasContext *ctx, arg_lddir *a)
 
 static bool trans_ertn(DisasContext *ctx, arg_ertn *a)
 {
-    if (check_plv_gspr(ctx)) {
-        return false;
+    if (ctx->plv == MMU_PLV_USER) {
+        generate_exception(ctx, EXCCODE_IPE);
+        return true;
     }
+    /* In PVM mode, ERTN uses guest shadow CSRs (handled by helper_ertn).
+     * No need to trap via GSPR - the helper reads guest.CSR_ERA/PRMD/CRMD
+     * and performs the return inline. */
     gen_helper_ertn(tcg_env);
     ctx->base.is_jmp = DISAS_EXIT;
     return true;
