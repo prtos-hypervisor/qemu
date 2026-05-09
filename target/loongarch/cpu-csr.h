@@ -86,9 +86,10 @@ FIELD(CSR_ASID, ASIDBITS, 16, 8)
 
 /* LVZ (LoongArch Virtualization) */
 #define LOONGARCH_CSR_GTLBC          0x15 /* Guest TLB control */
-FIELD(CSR_GTLBC, TGID, 0, 8)       /* Trap Guest ID */
+FIELD(CSR_GTLBC, GMTLBSZ, 0, 6)    /* Guest MTLB size */
+FIELD(CSR_GTLBC, USETGID, 12, 1)   /* Use TGID for TLB tagging */
 FIELD(CSR_GTLBC, TOTI, 13, 1)      /* Trap on TLB instruction */
-FIELD(CSR_GTLBC, USERID, 16, 8)    /* User-defined Guest ID */
+FIELD(CSR_GTLBC, TGID, 16, 8)      /* TLB Guest ID */
 
 #define LOONGARCH_CSR_GSTAT          0x50 /* Guest status */
 FIELD(CSR_GSTAT, PGM, 0, 1)        /* Processor Guest Mode (host read-only) */

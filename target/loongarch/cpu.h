@@ -480,12 +480,10 @@ typedef struct CPUArchState {
     } guest;
     /* Is CPU in guest (PVM) mode? Cached from CSR_GSTAT.PVM for fast check */
     bool in_guest_mode;
-    /* Count of TB starts since last VM entry. Used by helper_check_timer_irq
-     * to do direct timer expiry checks only during the initial phase after
-     * entering guest mode, avoiding interference with stable execution. */
+    /* Count of TB starts since last VM entry. */
     uint32_t guest_tb_count;
     /*
-     * LVZ: Guest timer offset (GCNT virtualization).
+     * LVZ: Guest counter offset (GCNT virtualization).
      *
      * When the guest reads CSR_CNTC, return host_stable_counter - offset.
      * This gives the guest a virtualized time base that can be skewed
@@ -494,6 +492,8 @@ typedef struct CPUArchState {
      * guest view of time.
      */
     uint64_t guest_timer_offset;
+    /* Absolute virtual-clock tick deadline for the optional direct guest timer. */
+    uint64_t guest_timer_deadline;
     /*
      * LVZ: Cached Guest INterrupt Control state.
      *

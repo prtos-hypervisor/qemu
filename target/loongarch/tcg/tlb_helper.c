@@ -23,6 +23,27 @@
 
 typedef bool (*tlb_match)(bool global, int asid, int tlb_asid);
 
+static uint64_t current_tlb_gid(CPULoongArchState *env)
+{
+    if (FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, USETGID)) {
+        return FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, TGID);
+    }
+
+    if (env->in_guest_mode) {
+        return FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, GID);
+    }
+
+    return 0;
+}
+
+static uint16_t current_tlb_asid(CPULoongArchState *env)
+{
+    return (env->in_guest_mode ||
+            FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, USETGID)) ?
+           FIELD_EX64(env->guest.CSR_ASID, CSR_ASID, ASID) :
+           FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+}
+
 static bool tlb_match_any(bool global, int asid, int tlb_asid)
 {
     return global || tlb_asid == asid;
@@ -155,7 +176,7 @@ static void invalidate_tlb(CPULoongArchState *env, int index)
     uint16_t csr_asid, tlb_asid, tlb_g;
     uint8_t tlb_e;
 
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     tlb = &env->tlb[index];
     tlb_e = FIELD_EX64(tlb->tlb_misc, TLB_MISC, E);
     if (!tlb_e) {
@@ -229,13 +250,10 @@ static void fill_tlb_entry(CPULoongArchState *env, LoongArchTLB *tlb,
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, PS, csr_ps);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, VPPN, csr_vppn);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 1);
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, ASID, csr_asid);
-        /* LVZ GID: tag entry with current Guest ID when in guest mode */
-        if (env->in_guest_mode) {
-            uint64_t tlb_gid = FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, GID);
-            tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, GID, tlb_gid);
-        }
+    tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, GID,
+                               current_tlb_gid(env));
 
     tlb->tlb_entry0 = lo0;
     tlb->tlb_entry1 = lo1;
@@ -266,7 +284,9 @@ static LoongArchTLB *loongarch_tlb_search_cb(CPULoongArchState *env,
     uint8_t tlb_e, tlb_ps, stlb_ps;
     bool tlb_g;
     int i, compare_shift;
-    uint64_t vpn, tlb_vppn;
+    uint64_t vpn, tlb_vppn, csr_gid, tlb_gid;
+
+    csr_gid = current_tlb_gid(env);
 
     stlb_ps = FIELD_EX64(env->CSR_STLBPS, CSR_STLBPS, PS);
     vpn = (vaddr & TARGET_VIRT_MASK) >> (stlb_ps + 1);
@@ -280,9 +300,11 @@ static LoongArchTLB *loongarch_tlb_search_cb(CPULoongArchState *env,
         if (tlb_e) {
             tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
             tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
+            tlb_gid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, GID);
             tlb_g = !!FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
 
-            if (func(tlb_g, csr_asid, tlb_asid) &&
+            if (tlb_gid == csr_gid &&
+                func(tlb_g, csr_asid, tlb_asid) &&
                 (vpn == (tlb_vppn >> compare_shift))) {
                 return tlb;
             }
@@ -297,10 +319,12 @@ static LoongArchTLB *loongarch_tlb_search_cb(CPULoongArchState *env,
             tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
             tlb_ps = FIELD_EX64(tlb->tlb_misc, TLB_MISC, PS);
             tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
+            tlb_gid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, GID);
             tlb_g = FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
             compare_shift = tlb_ps + 1 - R_TLB_MISC_VPPN_SHIFT;
             vpn = (vaddr & TARGET_VIRT_MASK) >> (tlb_ps + 1);
-            if (func(tlb_g, csr_asid, tlb_asid) &&
+            if (tlb_gid == csr_gid &&
+                func(tlb_g, csr_asid, tlb_asid) &&
                 (vpn == (tlb_vppn >> compare_shift))) {
                 return tlb;
             }
@@ -317,7 +341,7 @@ static bool loongarch_tlb_search(CPULoongArchState *env, vaddr vaddr,
     LoongArchTLB *tlb;
 
     func = tlb_match_any;
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     tlb = loongarch_tlb_search_cb(env, vaddr, csr_asid, func);
     if (tlb) {
         *index = tlb - env->tlb;
@@ -625,7 +649,7 @@ static int get_tlb_random_index(CPULoongArchState *env, vaddr addr,
 
     /* Validity of stlb_ps is checked in helper_csrwr_stlbps() */
     stlb_ps = FIELD_EX64(env->CSR_STLBPS, CSR_STLBPS, PS);
-    asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    asid = current_tlb_asid(env);
     if (pagesize == stlb_ps) {
         /* Only write into STLB bits [47:13] */
         address = addr & ~MAKE_64BIT_MASK(0, R_CSR_TLBEHI_64_VPPN_SHIFT);
@@ -714,7 +738,7 @@ void helper_tlbclr(CPULoongArchState *env)
     int i, index;
     uint16_t csr_asid, tlb_asid, tlb_g;
 
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     index = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, INDEX);
 
     if (index < LOONGARCH_STLB) {

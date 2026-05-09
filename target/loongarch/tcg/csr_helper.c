@@ -124,14 +124,15 @@ target_ulong helper_csrwr_tcfg(CPULoongArchState *env, target_ulong val)
 
     cpu_loongarch_store_constant_timer_config(cpu, val);
 
-    /* Store absolute deadline in TICKS for helper_check_timer_irq.
-     * TCFG[63:2] is the interval count value. Counter = ns/10. */
+    /* Store absolute deadline in ticks for helper_check_timer_irq. */
     if (val & 0x1UL) {
         int64_t now_ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
-        int64_t interval_ticks = (val & 0xfffffffffffcUL);
+        int64_t interval_ticks = FIELD_EX64(val, CSR_TCFG, INIT_VAL);
         if (interval_ticks > 0) {
-            env->guest_timer_offset = now_ticks + interval_ticks;
+            env->guest_timer_deadline = now_ticks + interval_ticks;
         }
+    } else {
+        env->guest_timer_deadline = 0;
     }
 
     return old_v;
@@ -248,7 +249,6 @@ target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
      * the very next instruction. This eliminates the 50ms+ latency of
      * waiting for the next TB boundary.
      */
-
     return old_v;
 }
 
@@ -266,9 +266,10 @@ target_ulong helper_gcsrwr_ticlr(CPULoongArchState *env, target_ulong val)
          * Also re-enable CSR_TCFG so the helper knows timer is active. */
         if (env->guest.CSR_TCFG & 0x1UL) {
             int64_t now_ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
-            int64_t interval = (env->guest.CSR_TCFG & 0xfffffffffffcUL);
+            int64_t interval = FIELD_EX64(env->guest.CSR_TCFG,
+                                          CSR_TCFG, INIT_VAL);
             env->CSR_TCFG = env->guest.CSR_TCFG;
-            env->guest_timer_offset = now_ticks + interval;
+            env->guest_timer_deadline = interval ? now_ticks + interval : 0;
         }
     }
 

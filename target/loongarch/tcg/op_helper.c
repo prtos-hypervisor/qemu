@@ -19,7 +19,6 @@
 #include "exec/cputlb.h"
 
 #define CONSTANT_TIMER_ENABLE 0x1UL
-#define CONSTANT_TIMER_TICK_MASK 0xfffffffffffcUL
 #define TIMER_PERIOD 10
 
 /* Exceptions helpers */
@@ -194,17 +193,7 @@ void helper_idle(CPULoongArchState *env)
     do_raise_exception(env, EXCP_HLT, 0);
 }
 
-/*
- * Synchronous interrupt/timer check for guest-mode vCPUs.
- * Called at TB start when in PVM (guest) mode.
- *
- * Handles two cases:
- * 1) interrupt_request already set by iothread → deliver immediately.
- * 2) Timer expired but iothread hasn't delivered yet (MTTCG race) →
- *    set interrupt directly. Don't re-arm; the iothread callback will
- *    handle that when it fires (the expired deadline triggers it
- *    on the next main loop iteration).
- */
+/* Synchronous interrupt/timer check for guest-mode vCPUs at TB start. */
 void helper_check_timer_irq(CPULoongArchState *env)
 {
     CPUState *cs = env_cpu(env);
@@ -225,20 +214,20 @@ void helper_check_timer_irq(CPULoongArchState *env)
      * (callbacks don't fire between TBs in single-thread TCG). */
     {
         int fire = 0;
-        if (env->guest_timer_offset) {
+        if (!(env->CSR_GCFG & (1ULL << 9)) && env->guest_timer_deadline) {
             if (env->CSR_ESTAT & (1ULL << IRQ_TIMER)) {
                 fire = 1;
             } else {
                 int64_t now_t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
-                if (now_t >= (int64_t)env->guest_timer_offset) fire = 1;
+                if (now_t >= (int64_t)env->guest_timer_deadline) fire = 1;
             }
         }
         if (fire &&
             FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
             !(env->guest.CSR_ESTAT & (1ULL << 11)) &&
             (env->guest.CSR_EENTRY >= 0x9000000000000000ULL) &&
-        (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) & (1ULL << 11))) {
-
+            (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) &
+             (1ULL << IRQ_TIMER))) {
         /* Save guest state (hardware exception entry emulation) */
         env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PPLV,
             FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
@@ -263,7 +252,10 @@ void helper_check_timer_irq(CPULoongArchState *env)
          * re-delivery before the guest writes TICLR. The guest's inline
          * TICLR helper (helper_gcsrwr_ticlr) will re-arm the timer. */
         env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 0);
-        env->guest_timer_offset = 0; /* TICLR in handler will re-arm */
+        if (!FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS)) {
+            cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+        }
+        env->guest_timer_deadline = 0; /* TICLR in handler will re-arm */
         cpu_loop_exit(cs);
         }
     }
