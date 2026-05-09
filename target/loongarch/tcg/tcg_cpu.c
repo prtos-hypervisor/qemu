@@ -505,12 +505,12 @@ static void loongarch_cpu_do_transaction_failed(CPUState *cs, hwaddr physaddr,
 
 static inline bool cpu_loongarch_hw_interrupts_enabled(CPULoongArchState *env)
 {
-    bool ret = 0;
+    uint64_t crmd;
 
-    ret = (FIELD_EX64(env->CSR_CRMD, CSR_CRMD, IE) &&
-          !(FIELD_EX64(env->CSR_DBG, CSR_DBG, DST)));
+    crmd = env->in_guest_mode ? env->guest.CSR_CRMD : env->CSR_CRMD;
 
-    return ret;
+    return FIELD_EX64(crmd, CSR_CRMD, IE) &&
+           !FIELD_EX64(env->CSR_DBG, CSR_DBG, DST);
 }
 
 static bool loongarch_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
@@ -518,22 +518,12 @@ static bool loongarch_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPULoongArchState *env = cpu_env(cs);
 
-        /*
-         * In guest (PVM) mode, only deliver interrupts when the GUEST has
-         * interrupts enabled (guest CRMD.IE=1). This prevents interrupts
-         * from being dispatched before the guest's secondary CPU boot code
-         * has set up its exception vectors. The interrupt stays pending and
-         * will be delivered once the guest enables IE.
-         *
-         * On real hardware, external interrupts always cause VM exit
-         * regardless of guest IE. But the host hypervisor would then
-         * hold the interrupt pending and only inject a virtual interrupt
-         * into the guest when the guest has IE=1. We emulate this behavior
-         * by gating delivery on guest IE.
-         */
         if (env->in_guest_mode) {
-            if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
-                cpu_loongarch_hw_interrupts_pending(env)) {
+            /* IPI: always VM exit to PRTOS. Timer: handled by helper
+             * at TB start (direct delivery or fallback VM exit). */
+            uint32_t host_pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
+            uint32_t host_enabled = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
+            if ((host_pending & host_enabled) & BIT(IRQ_IPI)) {
                 cs->exception_index = EXCCODE_INT;
                 loongarch_cpu_do_interrupt(cs);
                 return true;

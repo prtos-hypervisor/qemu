@@ -85,10 +85,24 @@ bool cpu_loongarch_hw_interrupts_pending(CPULoongArchState *env)
     uint32_t pending;
     uint32_t status;
 
+    /* Always check host-level ESTAT - hardware interrupts (IPI, timer)
+     * are delivered here even when in guest mode. The hypervisor handles
+     * routing them to the guest. */
     pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
-    status  = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
+    status = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
 
-    return (pending & status) != 0;
+    if ((pending & status) != 0) {
+        return true;
+    }
+
+    /* Also check guest-level interrupts when in guest mode */
+    if (env->in_guest_mode) {
+        pending = FIELD_EX64(env->guest.CSR_ESTAT, CSR_ESTAT, IS);
+        status = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE);
+        return (pending & status) != 0;
+    }
+
+    return false;
 }
 #endif
 

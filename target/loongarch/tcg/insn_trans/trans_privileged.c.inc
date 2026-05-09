@@ -196,9 +196,17 @@ static bool guest_csr_write_needs_trap(unsigned int csr_num)
     case LOONGARCH_CSR_EENTRY:
     /* EUEN - hypervisor must sync to real hardware FP/LASX enable bits */
     case LOONGARCH_CSR_EUEN:
+    /* These CSRs have helper/exit semantics in the host path. Until guest
+     * inline shadow writes mirror those side effects, route them via GSPR.
+     */
+    case LOONGARCH_CSR_ESTAT:
+    case LOONGARCH_CSR_ASID:
+    case LOONGARCH_CSR_PWCL:
+    case LOONGARCH_CSR_PWCH:
+    case LOONGARCH_CSR_STLBPS:
         return true;
     default:
-        /* CRMD, PRMD, ERA, ECFG, ESTAT go inline to guest shadow.
+        /* CRMD, PRMD, ERA, ECFG go inline to guest shadow.
          * Hypervisor reads them via GCSRRD when needed (interrupt
          * delivery, exception emulation). */
         return false;
@@ -347,6 +355,14 @@ static bool trans_csrwr(DisasContext *ctx, arg_csrwr *a)
             generate_exception(ctx, EXCCODE_GSPR);
             return true;
         }
+        if (a->csr == LOONGARCH_CSR_TICLR) {
+            TCGv newval = tcg_temp_new();
+            TCGv oldval = tcg_temp_new();
+            tcg_gen_mov_tl(newval, gpr_src(ctx, a->rd, EXT_NONE));
+            gen_helper_gcsrwr_ticlr(oldval, tcg_env, newval);
+            gen_set_gpr(a->rd, oldval, EXT_NONE);
+            return true;
+        }
         /* Shadow optimization: direct access to guest CSR shadow */
         if (guest_csr_write_needs_trap(a->csr)) {
             generate_exception(ctx, EXCCODE_GSPR);
@@ -357,8 +373,13 @@ static bool trans_csrwr(DisasContext *ctx, arg_csrwr *a)
             TCGv newval = tcg_temp_new();
             TCGv oldval = tcg_temp_new();
             tcg_gen_mov_tl(newval, gpr_src(ctx, a->rd, EXT_NONE));
-            tcg_gen_ld_tl(oldval, tcg_env, guest_off);
-            tcg_gen_st_tl(newval, tcg_env, guest_off);
+            if (a->csr == LOONGARCH_CSR_CRMD) {
+                gen_helper_gcsrwr_crmd(oldval, tcg_env, newval);
+                ctx->base.is_jmp = DISAS_EXIT_UPDATE;
+            } else {
+                tcg_gen_ld_tl(oldval, tcg_env, guest_off);
+                tcg_gen_st_tl(newval, tcg_env, guest_off);
+            }
             gen_set_gpr(a->rd, oldval, EXT_NONE);
             return true;
         }
@@ -430,7 +451,12 @@ static bool trans_csrxchg(DisasContext *ctx, arg_csrxchg *a)
             tcg_gen_and_tl(newv, src1, mask);
             tcg_gen_andc_tl(temp, oldv, mask);
             tcg_gen_or_tl(newv, newv, temp);
-            tcg_gen_st_tl(newv, tcg_env, guest_off);
+            if (a->csr == LOONGARCH_CSR_CRMD) {
+                gen_helper_gcsrwr_crmd(temp, tcg_env, newv);
+                ctx->base.is_jmp = DISAS_EXIT_UPDATE;
+            } else {
+                tcg_gen_st_tl(newv, tcg_env, guest_off);
+            }
             gen_set_gpr(a->rd, oldv, EXT_NONE);
             return true;
         }
@@ -519,6 +545,12 @@ static bool trans_gcsrwr(DisasContext *ctx, arg_gcsrwr *a)
     int guest_off = get_guest_csr_offset(a->csr);
     if (guest_off >= 0) {
         src1 = gpr_src(ctx, a->rd, EXT_NONE);
+        if (a->csr == LOONGARCH_CSR_CRMD) {
+            dest = gpr_dst(ctx, a->rd, EXT_NONE);
+            gen_helper_gcsrwr_crmd(dest, tcg_env, src1);
+            gen_set_gpr(a->rd, dest, EXT_NONE);
+            return true;
+        }
         /* Save the new value in a temp BEFORE reading old value into dest,
          * because dest and src1 may alias (same register). */
         newval = tcg_temp_new();
@@ -780,7 +812,10 @@ static bool trans_dbcl(DisasContext *ctx, arg_dbcl *a)
 
 static bool trans_idle(DisasContext *ctx, arg_idle *a)
 {
-    if (check_plv_gspr(ctx)) {
+    /* Like RISC-V WFI: in guest mode, idle halts vCPU directly without
+     * trapping via GSPR. Host interrupts always cause VM exit regardless. */
+    if (ctx->plv == MMU_PLV_USER) {
+        generate_exception(ctx, EXCCODE_IPE);
         return false;
     }
 

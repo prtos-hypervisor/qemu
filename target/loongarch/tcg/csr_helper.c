@@ -121,16 +121,18 @@ target_ulong helper_csrwr_tcfg(CPULoongArchState *env, target_ulong val)
 {
     LoongArchCPU *cpu = env_archcpu(env);
     int64_t old_v = env->CSR_TCFG;
-    static int tcfg_helper_count = 0;
-    tcfg_helper_count++;
-    if (tcfg_helper_count <= 5) {
-        fprintf(stderr, "[TCFG_HELPER] #%d val=%lx pc=%lx guest=%d\n",
-                tcfg_helper_count, (unsigned long)val,
-                (unsigned long)env->pc, env->in_guest_mode);
-        fflush(stderr);
-    }
 
     cpu_loongarch_store_constant_timer_config(cpu, val);
+
+    /* Store absolute deadline in TICKS for helper_check_timer_irq.
+     * TCFG[63:2] is the interval count value. Counter = ns/10. */
+    if (val & 0x1UL) {
+        int64_t now_ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
+        int64_t interval_ticks = (val & 0xfffffffffffcUL);
+        if (interval_ticks > 0) {
+            env->guest_timer_offset = now_ticks + interval_ticks;
+        }
+    }
 
     return old_v;
 }
@@ -205,6 +207,8 @@ target_ulong helper_csrwr_gstat(CPULoongArchState *env, target_ulong val)
 target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
 {
     int64_t old_v = env->CSR_GINTC;
+    uint64_t estat_is = 0;
+    const uint64_t guest_irq_mask = ((1ULL << 13) - 1) & ~((1ULL << 5) - 1);
 
     env->CSR_GINTC = val;
     env->guest_gintc = val;
@@ -218,32 +222,68 @@ target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
      * The hypervisor is responsible for clearing them after delivery.
      */
     uint64_t vip = FIELD_EX64(val, CSR_GINTC, VIP);
-    if (vip) {
-        /*
-         * Inject VIP bits into the guest shadow ESTAT.
-         * The hypervisor reads guest ESTAT via GSPR trap, so we need
-         * to update env->guest.CSR_ESTAT so that the hypervisor's
-         * guest_csr_read() returns the injected bits.
-         *
-         * VIP bit 0 -> IPI (inter-processor interrupt, ESTAT bit 12)
-         * VIP bit 1 -> TI  (timer interrupt, ESTAT bit 11)
-         * VIP bit 2 -> HW  (hardware interrupt 0)
-         * etc.
-         *
-         * Mapping: VIP[n] -> ESTAT.IS[12 - n] for n=0..7
-         * (adjust mapping as needed for the specific platform)
-         */
-        uint64_t estat_is = 0;
-        if (vip & (1 << 0)) { estat_is |= (1ULL << 12); } /* IPI */
-        if (vip & (1 << 1)) { estat_is |= (1ULL << 11); } /* TI */
-        if (vip & (1 << 2)) { estat_is |= (1ULL << 10); } /* HW0 */
-        if (vip & (1 << 3)) { estat_is |= (1ULL << 9);  } /* HW1 */
-        if (vip & (1 << 4)) { estat_is |= (1ULL << 8);  } /* HW2 */
-        if (vip & (1 << 5)) { estat_is |= (1ULL << 7);  } /* HW3 */
-        if (vip & (1 << 6)) { estat_is |= (1ULL << 6);  } /* HW4 */
-        if (vip & (1 << 7)) { estat_is |= (1ULL << 5);  } /* HW5 */
 
-        env->guest.CSR_ESTAT |= estat_is;
+    /*
+     * Keep the guest shadow ESTAT interrupt-status view aligned with the
+     * current VIP bitmap. We must clear the bits we previously virtualized
+     * when the hypervisor drops a VIP source, otherwise QEMU will continue
+     * to think the guest has a pending interrupt after TICLR/IPI clear.
+     */
+    if (vip & (1 << 0)) { estat_is |= (1ULL << 12); } /* IPI */
+    if (vip & (1 << 1)) { estat_is |= (1ULL << 11); } /* TI */
+    if (vip & (1 << 2)) { estat_is |= (1ULL << 10); } /* HW0 */
+    if (vip & (1 << 3)) { estat_is |= (1ULL << 9);  } /* HW1 */
+    if (vip & (1 << 4)) { estat_is |= (1ULL << 8);  } /* HW2 */
+    if (vip & (1 << 5)) { estat_is |= (1ULL << 7);  } /* HW3 */
+    if (vip & (1 << 6)) { estat_is |= (1ULL << 6);  } /* HW4 */
+    if (vip & (1 << 7)) { estat_is |= (1ULL << 5);  } /* HW5 */
+
+    env->guest.CSR_ESTAT &= ~guest_irq_mask;
+    env->guest.CSR_ESTAT |= estat_is;
+
+    /*
+     * Like RISC-V hvip: when VIP bits are set and guest interrupts are
+     * enabled (guest CRMD.IE=1 && pending & enabled), immediately exit
+     * the current TB so exec_interrupt delivers the guest interrupt on
+     * the very next instruction. This eliminates the 50ms+ latency of
+     * waiting for the next TB boundary.
+     */
+
+    return old_v;
+}
+
+target_ulong helper_gcsrwr_ticlr(CPULoongArchState *env, target_ulong val)
+{
+    uint64_t old_v = 0;
+
+    if (val & 0x1) {
+        uint64_t vip = FIELD_EX64(env->guest_gintc, CSR_GINTC, VIP);
+        vip &= ~(1ULL << 1);
+        helper_csrwr_gintc(env, FIELD_DP64(env->guest_gintc, CSR_GINTC, VIP, vip));
+
+        /* Re-arm: update guest_timer_offset to next deadline.
+         * The helper_check_timer_irq will use this for next delivery.
+         * Also re-enable CSR_TCFG so the helper knows timer is active. */
+        if (env->guest.CSR_TCFG & 0x1UL) {
+            int64_t now_ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
+            int64_t interval = (env->guest.CSR_TCFG & 0xfffffffffffcUL);
+            env->CSR_TCFG = env->guest.CSR_TCFG;
+            env->guest_timer_offset = now_ticks + interval;
+        }
+    }
+
+    return old_v;
+}
+
+target_ulong helper_gcsrwr_crmd(CPULoongArchState *env, target_ulong val)
+{
+    uint64_t old_v = env->guest.CSR_CRMD;
+    uint8_t old_da = FIELD_EX64(old_v, CSR_CRMD, DA);
+
+    env->guest.CSR_CRMD = val;
+
+    if (old_da != FIELD_EX64(val, CSR_CRMD, DA)) {
+        tlb_flush(env_cpu(env));
     }
 
     return old_v;

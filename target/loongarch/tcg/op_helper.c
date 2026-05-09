@@ -208,40 +208,72 @@ void helper_idle(CPULoongArchState *env)
 void helper_check_timer_irq(CPULoongArchState *env)
 {
     CPUState *cs = env_cpu(env);
-    LoongArchCPU *cpu = LOONGARCH_CPU(cs);
 
-    /* Fast path: interrupt already pending — only deliver if guest IE=1 */
+    /* IPI: always deliver immediately (VM exit for PRTOS to handle) */
     if (qatomic_read(&cs->interrupt_request) & CPU_INTERRUPT_HARD) {
-        if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE)) {
+        uint64_t host_pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
+        uint64_t host_enabled = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
+        if ((host_pending & host_enabled) & BIT(IRQ_IPI)) {
             cs->exception_index = EXCCODE_INT;
             cpu_loop_exit(cs);
         }
-        /* IE=0: hold the interrupt pending until guest enables interrupts */
     }
 
-    /* Check timer expiry directly — only for secondary vCPUs.
-     * CPU0's timer delivery via the iothread works reliably; applying
-     * this check to CPU0 interferes with its normal timer management. */
-    if (cs->cpu_index != 0 && (env->CSR_TCFG & CONSTANT_TIMER_ENABLE)) {
-        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        int64_t expire = timer_expire_time_ns(&cpu->timer);
-        if (expire != -1 && now >= expire) {
-            env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 1);
-            qatomic_or(&cs->interrupt_request, CPU_INTERRUPT_HARD);
-
-            /* Re-arm periodic timer */
-            if (FIELD_EX64(env->CSR_TCFG, CSR_TCFG, PERIODIC)) {
-                int64_t next = now + (env->CSR_TCFG & CONSTANT_TIMER_TICK_MASK)
-                               * TIMER_PERIOD;
-                timer_mod(&cpu->timer, next);
+    /* Guest timer: deliver directly to guest like RISC-V hvip.
+     * Fire when timer armed AND (callback fired OR deadline passed).
+     * Callback handles idle wakeup, deadline handles active CPUs
+     * (callbacks don't fire between TBs in single-thread TCG). */
+    {
+        int fire = 0;
+        if (env->guest_timer_offset) {
+            if (env->CSR_ESTAT & (1ULL << IRQ_TIMER)) {
+                fire = 1;
             } else {
-                env->CSR_TCFG = FIELD_DP64(env->CSR_TCFG, CSR_TCFG, EN, 0);
-                timer_del(&cpu->timer);
+                int64_t now_t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
+                if (now_t >= (int64_t)env->guest_timer_offset) fire = 1;
             }
-
-            cs->exception_index = EXCCODE_INT;
-            cpu_loop_exit(cs);
         }
+        if (fire &&
+            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
+            !(env->guest.CSR_ESTAT & (1ULL << 11)) &&
+            (env->guest.CSR_EENTRY >= 0x9000000000000000ULL) &&
+        (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) & (1ULL << 11))) {
+
+        /* Save guest state (hardware exception entry emulation) */
+        env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PPLV,
+            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
+        env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PIE,
+            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
+        env->guest.CSR_ERA = env->pc;
+        env->guest.CSR_ESTAT |= (1ULL << 11); /* Set TI */
+        env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT, CSR_ESTAT, ECODE, 0);
+        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, IE, 0);
+        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, PLV, 0);
+
+        /* Compute vectored interrupt entry point */
+        uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
+        uint64_t vec_size = gvs ? ((1ULL << gvs) * 4) : 0;
+        if (vec_size) {
+            env->pc = env->guest.CSR_EENTRY + (64 + 11) * vec_size; /* TI = bit 11 */
+        } else {
+            env->pc = env->guest.CSR_EENTRY;
+        }
+
+        /* Clear host ESTAT.TI and STOP the host timer to prevent
+         * re-delivery before the guest writes TICLR. The guest's inline
+         * TICLR helper (helper_gcsrwr_ticlr) will re-arm the timer. */
+        env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 0);
+        env->guest_timer_offset = 0; /* TICLR in handler will re-arm */
+        cpu_loop_exit(cs);
+        }
+    }
+
+    /* Fallback: if conditions not met for direct delivery, trigger VM exit
+     * so PRTOS can handle it (e.g., during early boot before EENTRY set). */
+    if ((env->CSR_ESTAT & (1ULL << IRQ_TIMER)) &&
+        (FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE) & (1ULL << IRQ_TIMER))) {
+        cs->exception_index = EXCCODE_INT;
+        cpu_loop_exit(cs);
     }
 }
 #endif
