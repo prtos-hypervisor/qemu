@@ -208,60 +208,40 @@ void helper_check_timer_irq(CPULoongArchState *env)
         }
     }
 
-    /* Guest timer: deliver directly to guest like RISC-V hvip.
-     * Fire when timer armed AND (callback fired OR deadline passed).
-     * Callback handles idle wakeup, deadline handles active CPUs
-     * (callbacks don't fire between TBs in single-thread TCG). */
-    {
-        int fire = 0;
-        if (!(env->CSR_GCFG & (1ULL << 9)) && env->guest_timer_deadline) {
-            if (env->CSR_ESTAT & (1ULL << IRQ_TIMER)) {
-                fire = 1;
-            } else {
-                int64_t now_t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
-                if (now_t >= (int64_t)env->guest_timer_deadline) fire = 1;
-            }
-        }
-        if (fire &&
-            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
-            !(env->guest.CSR_ESTAT & (1ULL << 11)) &&
-            (env->guest.CSR_EENTRY >= 0x9000000000000000ULL) &&
-            (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) &
-             (1ULL << IRQ_TIMER))) {
-        /* Save guest state (hardware exception entry emulation) */
+    /* Guest IPI may have been queued while guest IE was disabled. Re-check at
+     * TB boundaries so enabling IE later still observes the pending VIP. */
+    if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
+        (env->guest.CSR_ESTAT & (1ULL << 12)) &&
+        (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) & (1ULL << 12)) &&
+        (env->guest.CSR_EENTRY >= 0x9000000000000000ULL)) {
         env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PPLV,
             FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
         env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PIE,
             FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
         env->guest.CSR_ERA = env->pc;
-        env->guest.CSR_ESTAT |= (1ULL << 11); /* Set TI */
         env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT, CSR_ESTAT, ECODE, 0);
         env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, IE, 0);
         env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, PLV, 0);
 
-        /* Compute vectored interrupt entry point */
         uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
         uint64_t vec_size = gvs ? ((1ULL << gvs) * 4) : 0;
-        if (vec_size) {
-            env->pc = env->guest.CSR_EENTRY + (64 + 11) * vec_size; /* TI = bit 11 */
-        } else {
-            env->pc = env->guest.CSR_EENTRY;
-        }
-
-        /* Clear host ESTAT.TI and STOP the host timer to prevent
-         * re-delivery before the guest writes TICLR. The guest's inline
-         * TICLR helper (helper_gcsrwr_ticlr) will re-arm the timer. */
-        env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 0);
-        if (!FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS)) {
-            cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
-        }
-        env->guest_timer_deadline = 0; /* TICLR in handler will re-arm */
+        env->pc = vec_size ? env->guest.CSR_EENTRY + (64 + 12) * vec_size
+                           : env->guest.CSR_EENTRY;
         cpu_loop_exit(cs);
+    }
+
+    /* Guest timer: QEMU only wakes/exits guest vCPUs. PRTOS owns guest
+     * interrupt injection and keeps its software CSR state synchronized.
+     * Timer callbacks wake halted CPUs; this deadline check covers active
+     * CPUs because callbacks are not processed between every TB in TCG. */
+    if ((env->CSR_GCFG & (1ULL << 9)) && env->guest_timer_deadline) {
+        int64_t now_t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 10;
+
+        if (now_t >= (int64_t)env->guest_timer_deadline) {
+            env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 1);
         }
     }
 
-    /* Fallback: if conditions not met for direct delivery, trigger VM exit
-     * so PRTOS can handle it (e.g., during early boot before EENTRY set). */
     if ((env->CSR_ESTAT & (1ULL << IRQ_TIMER)) &&
         (FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE) & (1ULL << IRQ_TIMER))) {
         cs->exception_index = EXCCODE_INT;

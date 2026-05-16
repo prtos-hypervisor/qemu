@@ -53,6 +53,23 @@ void cpu_loongarch_store_constant_timer_config(LoongArchCPU *cpu,
     }
 }
 
+void cpu_loongarch_store_guest_timer_config(LoongArchCPU *cpu,
+                                            uint64_t value)
+{
+    CPULoongArchState *env = &cpu->env;
+    uint64_t initval = constant_timer_initval(value);
+    uint64_t now;
+
+    if ((value & CONSTANT_TIMER_ENABLE) && initval) {
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        env->guest_timer_deadline = now / TIMER_PERIOD + initval;
+        timer_mod(&cpu->guest_timer, now + initval * TIMER_PERIOD);
+    } else {
+        env->guest_timer_deadline = 0;
+        timer_del(&cpu->guest_timer);
+    }
+}
+
 void loongarch_constant_timer_cb(void *opaque)
 {
     LoongArchCPU *cpu  = opaque;
@@ -68,4 +85,20 @@ void loongarch_constant_timer_cb(void *opaque)
     }
 
     loongarch_cpu_set_irq(opaque, IRQ_TIMER, 1);
+}
+
+void loongarch_guest_timer_cb(void *opaque)
+{
+    LoongArchCPU *cpu = opaque;
+    CPULoongArchState *env = &cpu->env;
+    uint64_t tcfg = env->guest.CSR_TCFG;
+
+    if (FIELD_EX64(tcfg, CSR_TCFG, PERIODIC)) {
+        cpu_loongarch_store_guest_timer_config(cpu, tcfg);
+    } else {
+        env->guest.CSR_TCFG = FIELD_DP64(tcfg, CSR_TCFG, EN, 0);
+        env->guest_timer_deadline = 0;
+    }
+
+    loongarch_cpu_set_irq(cpu, IRQ_TIMER, 1);
 }

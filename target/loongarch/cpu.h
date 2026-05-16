@@ -545,6 +545,7 @@ struct ArchCPU {
 
     CPULoongArchState env;
     QEMUTimer timer;
+    QEMUTimer guest_timer;
     uint32_t  phy_id;
     OnOffAuto lbt;
     OnOffAuto pmu;

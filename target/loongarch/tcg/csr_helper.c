@@ -124,17 +124,6 @@ target_ulong helper_csrwr_tcfg(CPULoongArchState *env, target_ulong val)
 
     cpu_loongarch_store_constant_timer_config(cpu, val);
 
-    /* Store absolute deadline in ticks for helper_check_timer_irq. */
-    if (val & 0x1UL) {
-        int64_t now_ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
-        int64_t interval_ticks = FIELD_EX64(val, CSR_TCFG, INIT_VAL);
-        if (interval_ticks > 0) {
-            env->guest_timer_deadline = now_ticks + interval_ticks;
-        }
-    } else {
-        env->guest_timer_deadline = 0;
-    }
-
     return old_v;
 }
 
@@ -210,6 +199,7 @@ target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
     int64_t old_v = env->CSR_GINTC;
     uint64_t estat_is = 0;
     const uint64_t guest_irq_mask = ((1ULL << 13) - 1) & ~((1ULL << 5) - 1);
+    CPUState *cs = env_cpu(env);
 
     env->CSR_GINTC = val;
     env->guest_gintc = val;
@@ -244,16 +234,26 @@ target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
 
     /*
      * Like RISC-V hvip: when VIP bits are set and guest interrupts are
-     * enabled (guest CRMD.IE=1 && pending & enabled), immediately exit
-     * the current TB so exec_interrupt delivers the guest interrupt on
-     * the very next instruction. This eliminates the 50ms+ latency of
-     * waiting for the next TB boundary.
+     * enabled, kick the CPU so exec_interrupt delivers the guest interrupt
+     * promptly instead of waiting for an arbitrary later TB boundary.
      */
+    if (env->in_guest_mode && vip) {
+        if (bql_locked()) {
+            cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
+        } else {
+            cpu_set_interrupt(cs, CPU_INTERRUPT_EXITTB);
+            if (!qemu_cpu_is_self(cs)) {
+                qemu_cpu_kick(cs);
+            }
+        }
+    }
+
     return old_v;
 }
 
 target_ulong helper_gcsrwr_ticlr(CPULoongArchState *env, target_ulong val)
 {
+    LoongArchCPU *cpu = env_archcpu(env);
     uint64_t old_v = 0;
 
     if (val & 0x1) {
@@ -261,16 +261,38 @@ target_ulong helper_gcsrwr_ticlr(CPULoongArchState *env, target_ulong val)
         vip &= ~(1ULL << 1);
         helper_csrwr_gintc(env, FIELD_DP64(env->guest_gintc, CSR_GINTC, VIP, vip));
 
-        /* Re-arm: update guest_timer_offset to next deadline.
-         * The helper_check_timer_irq will use this for next delivery.
-         * Also re-enable CSR_TCFG so the helper knows timer is active. */
+        /* Re-arm the virtual guest deadline without touching host CSR_TCFG.
+         * The hypervisor owns physical timer programming; guest timer expiry
+         * is observed at TB boundaries and converted into a VM exit. */
         if (env->guest.CSR_TCFG & 0x1UL) {
-            int64_t now_ticks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / 10;
             int64_t interval = FIELD_EX64(env->guest.CSR_TCFG,
                                           CSR_TCFG, INIT_VAL);
-            env->CSR_TCFG = env->guest.CSR_TCFG;
-            env->guest_timer_deadline = interval ? now_ticks + interval : 0;
+            if (interval) {
+                cpu_loongarch_store_guest_timer_config(cpu, env->guest.CSR_TCFG);
+            } else {
+                cpu_loongarch_store_guest_timer_config(cpu, 0);
+            }
         }
+    }
+
+    return old_v;
+}
+
+target_ulong helper_gcsrwr_tcfg(CPULoongArchState *env, target_ulong val)
+{
+    LoongArchCPU *cpu = env_archcpu(env);
+    uint64_t old_v = env->guest.CSR_TCFG;
+
+    env->guest.CSR_TCFG = val;
+    if (val & 0x1UL) {
+        int64_t interval = FIELD_EX64(val, CSR_TCFG, INIT_VAL);
+        if (interval) {
+            cpu_loongarch_store_guest_timer_config(cpu, val);
+        } else {
+            cpu_loongarch_store_guest_timer_config(cpu, 0);
+        }
+    } else {
+        cpu_loongarch_store_guest_timer_config(cpu, 0);
     }
 
     return old_v;

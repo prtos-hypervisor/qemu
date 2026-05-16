@@ -542,9 +542,22 @@ static bool trans_gcsrwr(DisasContext *ctx, arg_gcsrwr *a)
         return false;
     }
 
+    src1 = gpr_src(ctx, a->rd, EXT_NONE);
+    if (a->csr == LOONGARCH_CSR_TCFG) {
+        dest = gpr_dst(ctx, a->rd, EXT_NONE);
+        gen_helper_gcsrwr_tcfg(dest, tcg_env, src1);
+        gen_set_gpr(a->rd, dest, EXT_NONE);
+        return true;
+    }
+    if (a->csr == LOONGARCH_CSR_TICLR) {
+        dest = gpr_dst(ctx, a->rd, EXT_NONE);
+        gen_helper_gcsrwr_ticlr(dest, tcg_env, src1);
+        gen_set_gpr(a->rd, dest, EXT_NONE);
+        return true;
+    }
+
     int guest_off = get_guest_csr_offset(a->csr);
     if (guest_off >= 0) {
-        src1 = gpr_src(ctx, a->rd, EXT_NONE);
         if (a->csr == LOONGARCH_CSR_CRMD) {
             dest = gpr_dst(ctx, a->rd, EXT_NONE);
             gen_helper_gcsrwr_crmd(dest, tcg_env, src1);
