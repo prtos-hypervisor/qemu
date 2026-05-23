@@ -89,9 +89,9 @@ static bool lvz_gcfg_top_is_set(DisasContext *ctx)
         return false;
     }
     /* GCFG.TOP is bit 13. Read from env->CSR_GCFG.
-     * We can't use ctx->cpucfg_gcfg because GCFG is runtime-changeable,
+     * We can't use ctx->cpucfg3 because GCFG is runtime-changeable,
      * so we use a helper to read it at translation time. */
-    return (ctx->cpucfg_gcfg >> 13) & 1;
+    return (ctx->cpucfg3 >> 13) & 1;
 }
 
 /*

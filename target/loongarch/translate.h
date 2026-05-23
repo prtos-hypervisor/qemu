@@ -69,11 +69,7 @@ typedef struct DisasContext {
     bool pvm;  /* Guest (PVM) mode - LVZ */
     uint32_t cpucfg1;
     uint32_t cpucfg2;
-<<<<<<< HEAD
-    uint64_t cpucfg_gcfg; /* GCFG value for LVZ TOP check */
-=======
     uint32_t cpucfg3;
->>>>>>> master
 } DisasContext;
 
 void generate_exception(DisasContext *ctx, int excp);
