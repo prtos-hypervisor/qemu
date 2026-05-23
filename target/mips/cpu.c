@@ -25,9 +25,7 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "internal.h"
-#include "kvm_mips.h"
 #include "qemu/module.h"
-#include "system/kvm.h"
 #include "system/qtest.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
@@ -339,7 +337,7 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
 
         if (cs->cpu_index == 0) {
             /* VPE0 starts up enabled.  */
-            env->mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
+            cpu->mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
             env->CP0_VPEConf0 |= (1 << CP0VPEC0_MVP) | (1 << CP0VPEC0_VPA);
 
             /* TC0 starts up unhalted.  */
@@ -416,9 +414,6 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
         /* UHI interface can be used to obtain argc and argv */
         env->active_tc.gpr[4] = -1;
     }
-    if (kvm_enabled()) {
-        kvm_mips_reset_vcpu(cpu);
-    }
 #endif
 }
 
@@ -449,7 +444,7 @@ static void mips_cp0_period_set(MIPSCPU *cpu)
 
     clock_set_mul_div(cpu->count_div, env->cpu_model->CCRes, 1);
     clock_set_source(cpu->count_div, cpu->clock);
-    clock_set_source(env->count_clock, cpu->count_div);
+    clock_set_source(cpu->count_clock, cpu->count_div);
 }
 
 static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
@@ -502,6 +497,16 @@ static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
     mcc->parent_realize(dev, errp);
 }
 
+static void mips_cpu_unrealizefn(DeviceState *dev)
+{
+    MIPSCPU *cpu = MIPS_CPU(dev);
+    MIPSCPUClass *mcc = MIPS_CPU_GET_CLASS(dev);
+
+    g_free(cpu->mvp);
+
+    mcc->parent_unrealize(dev);
+}
+
 static void mips_cpu_initfn(Object *obj)
 {
     MIPSCPU *cpu = MIPS_CPU(obj);
@@ -510,7 +515,7 @@ static void mips_cpu_initfn(Object *obj)
 
     cpu->clock = qdev_init_clock_in(DEVICE(obj), "clk-in", NULL, cpu, 0);
     cpu->count_div = clock_new(OBJECT(obj), "clk-div-count");
-    env->count_clock = clock_new(OBJECT(obj), "clk-count");
+    cpu->count_clock = clock_new(OBJECT(obj), "clk-count");
     env->cpu_model = mcc->cpu_def;
 }
 
@@ -535,7 +540,7 @@ static ObjectClass *mips_cpu_class_by_name(const char *cpu_model)
 
 static const struct SysemuCPUOps mips_sysemu_ops = {
     .has_work = mips_cpu_has_work,
-    .get_phys_page_debug = mips_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = mips_cpu_get_phys_addr_debug,
     .legacy_vmsd = &vmstate_mips_cpu,
 };
 #endif
@@ -555,11 +560,17 @@ static int mips_cpu_mmu_index(CPUState *cs, bool ifunc)
 static TCGTBCPUState mips_get_tb_cpu_state(CPUState *cs)
 {
     CPUMIPSState *env = cpu_env(cs);
+    uint32_t flags = env->hflags & MIPS_HFLAG_TB_MASK;
+
+#ifdef CONFIG_USER_ONLY
+    if (!cs->prctl_unalign_sigbus) {
+        flags |= TB_FLAG_MIPS_FIXADE;
+    }
+#endif
 
     return (TCGTBCPUState){
         .pc = env->active_tc.PC,
-        .flags = env->hflags & (MIPS_HFLAG_TMASK | MIPS_HFLAG_BMASK |
-                                MIPS_HFLAG_HWRENA_ULR),
+        .flags = flags,
     };
 }
 
@@ -606,6 +617,8 @@ static void mips_cpu_class_init(ObjectClass *c, const void *data)
     device_class_set_props(dc, mips_cpu_properties);
     device_class_set_parent_realize(dc, mips_cpu_realizefn,
                                     &mcc->parent_realize);
+    device_class_set_parent_unrealize(dc, mips_cpu_unrealizefn,
+                                      &mcc->parent_unrealize);
     resettable_class_set_parent_phases(rc, NULL, mips_cpu_reset_hold, NULL,
                                        &mcc->parent_phases);
 

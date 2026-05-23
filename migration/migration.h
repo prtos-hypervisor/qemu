@@ -359,7 +359,6 @@ struct MigrationState {
     /* Timestamp when VM is down (ms) to migrate the last stuff */
     int64_t downtime_start;
     int64_t downtime;
-    int64_t expected_downtime;
     bool capabilities[MIGRATION_CAPABILITY__MAX];
     int64_t setup_time;
 
@@ -512,8 +511,12 @@ struct MigrationState {
     bool rdma_migration;
 
     bool postcopy_package_loaded;
-    QemuEvent postcopy_package_loaded_event;
 
+    /*
+     * When set, it means cpr-transfer is waiting for the HUP signal from
+     * destination to continue the 2nd step of migration via the main
+     * channel.
+     */
     GSource *hup_source;
 
     /*
@@ -586,6 +589,7 @@ void migration_cancel(void);
 void migration_populate_vfio_info(MigrationInfo *info);
 void migration_reset_vfio_bytes_transferred(void);
 void postcopy_temp_page_reset(PostcopyTmpPage *tmp_page);
+int64_t migration_downtime_calc_expected(MigrationState *s);
 
 /*
  * Migration thread waiting for return path thread.  Return non-zero if an

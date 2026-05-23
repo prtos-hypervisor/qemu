@@ -6630,6 +6630,58 @@ static abi_long do_prctl_syscall_user_dispatch(CPUArchState *env,
     }
 }
 
+#ifdef TARGET_NR_sysmips
+static abi_long do_sysmips_atomic_set(CPUArchState *env, abi_ulong addr,
+                                      abi_long value)
+{
+    uint32_t *ptr;
+    abi_long old;
+
+    if (addr & 3) {
+        return -TARGET_EINVAL;
+    }
+
+    ptr = lock_user(VERIFY_WRITE, addr, sizeof(*ptr), true);
+    if (!ptr) {
+        return -TARGET_EINVAL;
+    }
+
+    old = tswap32(qatomic_xchg(ptr, tswap32((uint32_t)value)));
+    unlock_user(ptr, addr, sizeof(*ptr));
+
+    /*
+     * MIPS uses a separate error flag, but the common linux-user syscall
+     * path infers that flag from the return value.  Successful atomic_set
+     * results can overlap the target errno range, so write the result
+     * registers here and ask the CPU loop to leave them alone.
+     */
+    env->active_tc.gpr[2] = old;
+    env->active_tc.gpr[7] = 0;
+    return -QEMU_ESIGRETURN;
+}
+
+static abi_long do_sysmips(CPUArchState *env, abi_long cmd, abi_long arg1,
+                           abi_long arg2)
+{
+    CPUState *cs = env_cpu(env);
+
+    switch (cmd) {
+    case TARGET_SYSMIPS_ATOMIC_SET:
+        return do_sysmips_atomic_set(env, arg1, arg2);
+    case TARGET_SYSMIPS_FIXADE:
+        if (arg1 & ~3) {
+            return -TARGET_EINVAL;
+        }
+        cs->prctl_unalign_sigbus = !(arg1 & 1);
+        return 0;
+    case TARGET_SYSMIPS_FLUSH_CACHE:
+        return 0;
+    default:
+        return -TARGET_EINVAL;
+    }
+}
+#endif
+
 static abi_long do_prctl(CPUArchState *env, abi_long option, abi_long arg2,
                          abi_long arg3, abi_long arg4, abi_long arg5)
 {
@@ -7005,7 +7057,6 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         cpu->random_seed = qemu_guest_random_seed_thread_part1();
 
         ret = pthread_create(&info.thread, &attr, clone_func, &info);
-        /* TODO: Free new CPU state if thread creation failed.  */
 
         sigprocmask(SIG_SETMASK, &info.sigmask, NULL);
         pthread_attr_destroy(&attr);
@@ -7014,7 +7065,16 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
             pthread_cond_wait(&info.cond, &info.mutex);
             ret = info.tid;
         } else {
+            errno = ret;
             ret = -1;
+            object_unparent(OBJECT(new_cpu));
+            object_unref(OBJECT(new_cpu));
+#ifdef TARGET_AARCH64
+            if (ts->gcs_base) {
+                target_munmap(ts->gcs_base, ts->gcs_size);
+            }
+#endif
+            g_free(ts);
         }
         pthread_mutex_unlock(&info.mutex);
         pthread_cond_destroy(&info.cond);
@@ -8790,9 +8850,9 @@ static int maybe_do_fake_open(CPUArchState *cpu_env, int dirfd,
             return -1;
         }
         if (safe) {
-            return safe_openat(dirfd, exec_path, flags, mode);
+            return safe_openat(dirfd, real_exec_path, flags, mode);
         } else {
-            return openat(dirfd, exec_path, flags, mode);
+            return openat(dirfd, real_exec_path, flags, mode);
         }
     }
 
@@ -8929,9 +8989,9 @@ ssize_t do_guest_readlink(const char *pathname, char *buf, size_t bufsiz)
          * Don't worry about sign mismatch as earlier mapping
          * logic would have thrown a bad address error.
          */
-        ret = MIN(strlen(exec_path), bufsiz);
+        ret = MIN(strlen(real_exec_path), bufsiz);
         /* We cannot NUL terminate the string. */
-        memcpy(buf, exec_path, ret);
+        memcpy(buf, real_exec_path, ret);
     } else {
         ret = readlink(path(pathname), buf, bufsiz);
     }
@@ -9022,7 +9082,7 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
 
     const char *exe = p;
     if (is_proc_myself(p, "exe")) {
-        exe = exec_path;
+        exe = real_exec_path;
     }
     ret = is_execveat
         ? safe_execveat(dirfd, exe, argp, envp, flags)
@@ -11033,9 +11093,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                  * Don't worry about sign mismatch as earlier mapping
                  * logic would have thrown a bad address error.
                  */
-                ret = MIN(strlen(exec_path), arg4);
+                ret = MIN(strlen(real_exec_path), arg4);
                 /* We cannot NUL terminate the string. */
-                memcpy(p2, exec_path, ret);
+                memcpy(p2, real_exec_path, ret);
             } else {
                 ret = get_errno(readlinkat(arg1, path(p), p2, arg4));
             }
@@ -12102,6 +12162,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
     case TARGET_NR_prctl:
         return do_prctl(cpu_env, arg1, arg2, arg3, arg4, arg5);
         break;
+#ifdef TARGET_NR_sysmips
+    case TARGET_NR_sysmips:
+        return do_sysmips(cpu_env, arg1, arg2, arg3);
+#endif
 #ifdef TARGET_NR_arch_prctl
     case TARGET_NR_arch_prctl:
         return do_arch_prctl(cpu_env, arg1, arg2);

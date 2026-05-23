@@ -1714,10 +1714,10 @@ void object_property_allow_set_link(const Object *obj, const char *name,
  *
  * Links form the graph in the object model.
  *
- * The @check() callback is invoked when
- * object_property_set_link() is called and can raise an error to prevent the
- * link being set.  If @check is NULL, the property is read-only
- * and cannot be set.
+ * The @check() callback is invoked when object_property_set_link() is called
+ * and can raise an error to prevent the link being set. If @check is NULL, the
+ * property is read-only and cannot be set. Care must be taken to handle NULL
+ * values for @val.
  *
  * Ownership of the pointer that @child points to is transferred to the
  * link property.  The reference count for *@child is
@@ -1741,6 +1741,23 @@ ObjectProperty *object_class_property_add_link(ObjectClass *oc,
                               void (*check)(const Object *obj, const char *name,
                                             Object *val, Error **errp),
                               ObjectPropertyLinkFlags flags);
+
+/**
+ * object_resolve_and_typecheck:
+ * @path: path to look up
+ * @name: name of property we are resolving for (used only in error messages)
+ * @target_type: QOM type we expect @path to resolve to
+ * @errp: error
+ *
+ * Look up the object at @path and return it. If it does not have the
+ * correct type @target_type, return NULL and set @errp.
+ *
+ * This is similar to object_resolve_path_type(), but it insists on a
+ * non-ambiguous path and it produces error messages that are
+ * specialised to the use case of setting a link property on an object.
+ */
+Object *object_resolve_and_typecheck(const char *path, const char *name,
+                                     const char *target_type, Error **errp);
 
 /**
  * object_property_add_str:

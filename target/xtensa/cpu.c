@@ -30,6 +30,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "exec/cpu-defs.h"
 #include "cpu.h"
 #include "fpu/softfloat.h"
 #include "qemu/module.h"
@@ -303,7 +304,7 @@ static const VMStateDescription vmstate_xtensa_cpu = {
 
 static const struct SysemuCPUOps xtensa_sysemu_ops = {
     .has_work = xtensa_cpu_has_work,
-    .get_phys_page_debug = xtensa_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = xtensa_cpu_get_phys_addr_debug,
 };
 #endif
 

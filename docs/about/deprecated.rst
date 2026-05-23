@@ -149,6 +149,11 @@ Use ``job-dismiss`` instead.
 
 Use ``job-finalize`` instead.
 
+``query-kvm`` (since 11.0)
+''''''''''''''''''''''''''
+
+Use ``query-accelerators`` instead.
+
 Human Machine Protocol (HMP) commands
 -------------------------------------
 
@@ -171,14 +176,6 @@ The ``info capture`` command is deprecated and will be removed in a future relea
 
 Host Architectures
 ------------------
-
-MIPS (since 10.2)
-'''''''''''''''''
-
-MIPS is not supported by Debian 13 ("Trixie") and newer, making it hard to
-maintain our cross-compilation CI tests of the architecture. As we no longer
-have CI coverage support may bitrot away before the deprecation process
-completes.
 
 TCG Plugin support not enabled by default with TCI (since 9.2)
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -244,43 +241,6 @@ The ``dtb-kaslr-seed`` property on the ``virt`` board has been
 deprecated; use the new name ``dtb-randomness`` instead. The new name
 better reflects the way this property affects all random data within
 the device tree blob, not just the ``kaslr-seed`` node.
-
-Arm ``sonorapass-bmc`` machine (since 10.2)
-'''''''''''''''''''''''''''''''''''''''''''
-
-The ``sonorapass-bmc`` machine represents a lab server that never
-entered production. Since it does not rely on any specific device
-models, it can be replaced by the ``ast2500-evb`` machine using the
-``fmc-model`` option to specify the flash type. The I2C devices
-connected to the board can be defined via the QEMU command line.
-
-Arm ``qcom-dc-scm-v1-bmc`` and ``qcom-firework-bmc`` machine (since 10.2)
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-
-The ``qcom-dc-scm-v1-bmc`` and ``qcom-firework-bmc`` represent lab
-servers that never entered production. Since they do not rely on any
-specific device models, they can be replaced by the ``ast2600-evb``
-machine using the ``fmc-model`` option to specify the flash type. The
-I2C devices connected to the board can be defined via the QEMU command
-line.
-
-Arm ``fp5280g2-bmc`` machine (since 10.2)
-'''''''''''''''''''''''''''''''''''''''''
-
-The ``fp5280g2-bmc`` machine does not rely on any specific device
-models, it can be replaced by the ``ast2500-evb`` machine using the
-``fmc-model`` option to specify the flash type. The I2C devices
-connected to the board can be defined via the QEMU command line.
-
-Arm ``fby35`` machine (since 10.2)
-''''''''''''''''''''''''''''''''''
-
-The ``fby35`` machine was originally added as an example of a
-multi-SoC system, with the expectation the models would evolve over
-time in an heterogeneous system. This hasn't happened and no public
-firmware is available to boot it. It can be replaced by the
-``ast2700fc``, another multi-SoC machine based on the newer AST2700
-SoCs which are excepted to receive better support in the future.
 
 
 RISC-V default machine option (since 10.0)
@@ -413,14 +373,6 @@ Specifying the iSCSI password in plain text on the command line using the
 ``password`` option is insecure. The ``password-secret`` option should be
 used instead, to refer to a ``--object secret...`` instance that provides
 a password via a file, or encrypted.
-
-``gluster`` backend (since 9.2)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-According to https://marc.info/?l=fedora-devel-list&m=171934833215726
-the GlusterFS development effectively ended. Unless the development
-gains momentum again, the QEMU project will remove the gluster backend
-in a future release.
 
 
 Character device options

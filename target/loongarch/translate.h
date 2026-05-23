@@ -43,6 +43,8 @@
 #define avail_LLACQ_SCREL(C)    (FIELD_EX32((C)->cpucfg2, CPUCFG2, LLACQ_SCREL))
 #define avail_LLACQ_SCREL_64(C) (avail_64(C) && avail_LLACQ_SCREL(C))
 
+#define avail_DBAR_HINT(C) (FIELD_EX32((C)->cpucfg3, CPUCFG3, DBAR_HINTS))
+
 /*
  * If an operation is being performed on less than TARGET_LONG_BITS,
  * it may require the inputs to be sign- or zero-extended; which will
@@ -67,7 +69,11 @@ typedef struct DisasContext {
     bool pvm;  /* Guest (PVM) mode - LVZ */
     uint32_t cpucfg1;
     uint32_t cpucfg2;
+<<<<<<< HEAD
     uint64_t cpucfg_gcfg; /* GCFG value for LVZ TOP check */
+=======
+    uint32_t cpucfg3;
+>>>>>>> master
 } DisasContext;
 
 void generate_exception(DisasContext *ctx, int excp);
