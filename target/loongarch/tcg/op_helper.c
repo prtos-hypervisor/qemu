@@ -193,59 +193,103 @@ void helper_idle(CPULoongArchState *env)
     do_raise_exception(env, EXCP_HLT, 0);
 }
 
-/* Synchronous interrupt/timer check for guest-mode vCPUs at TB start. */
+/* Synchronous interrupt/timer check at TB start.
+ * In PVM mode: handles guest interrupt delivery directly.
+ * In PLV0 mode: polls host timer expiry for single-threaded TCG. */
 void helper_check_timer_irq(CPULoongArchState *env)
 {
     CPUState *cs = env_cpu(env);
 
-    /* IPI: always deliver immediately (VM exit for PRTOS to handle) */
-    if (qatomic_read(&cs->interrupt_request) & CPU_INTERRUPT_HARD) {
-        uint64_t host_pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
-        uint64_t host_enabled = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
-        if ((host_pending & host_enabled) & BIT(IRQ_IPI)) {
-            cs->exception_index = EXCCODE_INT;
+    if (env->in_guest_mode) {
+        if (qatomic_read(&cs->interrupt_request) & CPU_INTERRUPT_HARD) {
+            uint64_t host_pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
+            uint64_t host_enabled = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
+            if ((host_pending & host_enabled) != 0) {
+                cs->exception_index = EXCCODE_INT;
+                cpu_loop_exit(cs);
+            }
+        }
+
+        if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
+            (env->guest.CSR_ESTAT & (1ULL << 12)) &&
+            (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) & (1ULL << 12)) &&
+            (env->guest.CSR_EENTRY >= 0x9000000000000000ULL)) {
+            env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PPLV,
+                FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
+            env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PIE,
+                FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
+            env->guest.CSR_ERA = env->pc;
+            env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT, CSR_ESTAT, ECODE, 0);
+            env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, IE, 0);
+            env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, PLV, 0);
+
+            uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
+            uint64_t vec_size = gvs ? ((1ULL << gvs) * 4) : 0;
+            env->pc = vec_size ? env->guest.CSR_EENTRY + (64 + 12) * vec_size
+                               : env->guest.CSR_EENTRY;
             cpu_loop_exit(cs);
         }
     }
 
-    /* Guest IPI may have been queued while guest IE was disabled. Re-check at
-     * TB boundaries so enabling IE later still observes the pending VIP. */
-    if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE) &&
-        (env->guest.CSR_ESTAT & (1ULL << 12)) &&
-        (FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE) & (1ULL << 12)) &&
-        (env->guest.CSR_EENTRY >= 0x9000000000000000ULL)) {
-        env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PPLV,
-            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
-        env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD, CSR_PRMD, PIE,
-            FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
-        env->guest.CSR_ERA = env->pc;
-        env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT, CSR_ESTAT, ECODE, 0);
-        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, IE, 0);
-        env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD, CSR_CRMD, PLV, 0);
-
-        uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
-        uint64_t vec_size = gvs ? ((1ULL << gvs) * 4) : 0;
-        env->pc = vec_size ? env->guest.CSR_EENTRY + (64 + 12) * vec_size
-                           : env->guest.CSR_EENTRY;
-        cpu_loop_exit(cs);
-    }
-
-    /* Guest timer: QEMU only wakes/exits guest vCPUs. PRTOS owns guest
-     * interrupt injection and keeps its software CSR state synchronized.
-     * Timer callbacks wake halted CPUs; this deadline check covers active
-     * CPUs because callbacks are not processed between every TB in TCG. */
-    if ((env->CSR_GCFG & (1ULL << 9)) && env->guest_timer_deadline) {
-        int64_t now_t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 10;
-
-        if (now_t >= (int64_t)env->guest_timer_deadline) {
-            env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 1);
+    if (FIELD_EX64(env->CSR_CRMD, CSR_CRMD, IE) &&
+        !(env->CSR_ESTAT & (1ULL << IRQ_TIMER))) {
+        LoongArchCPU *cpu = env_archcpu(env);
+        int64_t expire = timer_expire_time_ns(&cpu->timer);
+        if (expire >= 0) {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
+            if (now >= expire) {
+                env->CSR_ESTAT = deposit64(env->CSR_ESTAT, IRQ_TIMER, 1, 1);
+                if (env->in_guest_mode) {
+                    if (FIELD_EX64(env->CSR_TCFG, CSR_TCFG, PERIODIC)) {
+                        uint64_t next = now + FIELD_EX64(env->CSR_TCFG,
+                                            CSR_TCFG, INIT_VAL) * 10;
+                        timer_mod(&cpu->timer, next);
+                    } else {
+                        env->CSR_TCFG = FIELD_DP64(env->CSR_TCFG, CSR_TCFG, EN, 0);
+                    }
+                    cs->exception_index = EXCCODE_INT;
+                    cpu_loop_exit(cs);
+                } else {
+                    timer_del(&cpu->timer);
+                    qatomic_set(&cs->interrupt_request,
+                        cs->interrupt_request | CPU_INTERRUPT_HARD);
+                    cpu_exit(cs);
+                }
+            }
         }
     }
 
-    if ((env->CSR_ESTAT & (1ULL << IRQ_TIMER)) &&
-        (FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE) & (1ULL << IRQ_TIMER))) {
-        cs->exception_index = EXCCODE_INT;
-        cpu_loop_exit(cs);
+    /* In single-threaded TCG, also check other CPUs' timers and wake them.
+     * This ensures SMP scheduling works when one CPU is in a tight loop. */
+    {
+        CPUState *other;
+        int64_t now = 0;
+        CPU_FOREACH(other) {
+            if (other == cs) continue;
+            if (other->halted) {
+                LoongArchCPU *ocpu = LOONGARCH_CPU(other);
+                int64_t oexpire = timer_expire_time_ns(&ocpu->timer);
+                if (oexpire >= 0) {
+                    if (!now) now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
+                    if (now >= oexpire) {
+                        CPULoongArchState *oenv = &ocpu->env;
+                        oenv->CSR_ESTAT = deposit64(oenv->CSR_ESTAT,
+                                                    IRQ_TIMER, 1, 1);
+                        if (FIELD_EX64(oenv->CSR_TCFG, CSR_TCFG, PERIODIC)) {
+                            int64_t onext = now + FIELD_EX64(oenv->CSR_TCFG,
+                                                CSR_TCFG, INIT_VAL) * 10;
+                            timer_mod(&ocpu->timer, onext);
+                        } else {
+                            oenv->CSR_TCFG = FIELD_DP64(oenv->CSR_TCFG,
+                                                        CSR_TCFG, EN, 0);
+                        }
+                        other->halted = 0;
+                        qatomic_set(&other->interrupt_request,
+                            other->interrupt_request | CPU_INTERRUPT_HARD);
+                    }
+                }
+            }
+        }
     }
 }
 #endif

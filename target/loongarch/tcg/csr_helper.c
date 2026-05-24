@@ -238,14 +238,7 @@ target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
      * promptly instead of waiting for an arbitrary later TB boundary.
      */
     if (env->in_guest_mode && vip) {
-        if (bql_locked()) {
-            cpu_interrupt(cs, CPU_INTERRUPT_EXITTB);
-        } else {
-            cpu_set_interrupt(cs, CPU_INTERRUPT_EXITTB);
-            if (!qemu_cpu_is_self(cs)) {
-                qemu_cpu_kick(cs);
-            }
-        }
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_EXITTB);
     }
 
     return old_v;

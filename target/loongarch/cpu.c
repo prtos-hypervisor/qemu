@@ -746,9 +746,9 @@ static void loongarch_cpu_init(Object *obj)
 
     qdev_init_gpio_in(DEVICE(cpu), loongarch_cpu_set_irq, N_IRQS);
 #ifdef CONFIG_TCG
-    timer_init_ns(&cpu->timer, QEMU_CLOCK_VIRTUAL,
+    timer_init_ns(&cpu->timer, QEMU_CLOCK_VIRTUAL_RT,
                   &loongarch_constant_timer_cb, cpu);
-    timer_init_ns(&cpu->guest_timer, QEMU_CLOCK_VIRTUAL,
+    timer_init_ns(&cpu->guest_timer, QEMU_CLOCK_VIRTUAL_RT,
                   &loongarch_guest_timer_cb, cpu);
 #endif
 #endif

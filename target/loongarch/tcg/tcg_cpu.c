@@ -113,18 +113,7 @@ void loongarch_lvz_vm_entry(CPULoongArchState *env)
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 1);
     env->in_guest_mode = true;
     env->guest_tb_count = 0;
-    /*
-     * Disable TB chaining in guest mode to ensure timer interrupts
-     * (delivered via cpu_interrupt from iothread) are promptly processed.
-     * Without this, a self-looping TB may chain via goto_tb and the
-     * icount_decr exit check at TB start races with the kick.
-     */
     cs->tcg_cflags |= CF_NO_GOTO_TB;
-    /*
-     * Flush the TB jmp cache so that any TBs previously translated
-     * without CF_NO_GOTO_TB are discarded. Otherwise, cached TBs with
-     * goto_tb chains would be reused, bypassing the interrupt check.
-     */
     tcg_flush_jmp_cache(cs);
     /*
      * Initialize guest CRMD to DA mode (Direct Addressing) on first entry.
@@ -519,21 +508,47 @@ static bool loongarch_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         CPULoongArchState *env = cpu_env(cs);
 
         if (env->in_guest_mode) {
-            /* IPI: always VM exit to PRTOS. Timer: handled by helper
-             * at TB start (direct delivery or fallback VM exit). */
             uint32_t host_pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
             uint32_t host_enabled = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
-            if ((host_pending & host_enabled) & BIT(IRQ_IPI)) {
+            if ((host_pending & host_enabled) != 0) {
                 cs->exception_index = EXCCODE_INT;
                 loongarch_cpu_do_interrupt(cs);
                 return true;
+            }
+
+            if (FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE)) {
+                uint32_t gpending = FIELD_EX64(env->guest.CSR_ESTAT, CSR_ESTAT, IS);
+                uint32_t genabled = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE);
+                if ((gpending & genabled) != 0 &&
+                    env->guest.CSR_EENTRY >= 0x9000000000000000ULL) {
+                    env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
+                        CSR_PRMD, PPLV,
+                        FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, PLV));
+                    env->guest.CSR_PRMD = FIELD_DP64(env->guest.CSR_PRMD,
+                        CSR_PRMD, PIE,
+                        FIELD_EX64(env->guest.CSR_CRMD, CSR_CRMD, IE));
+                    env->guest.CSR_ERA = env->pc;
+                    env->guest.CSR_ESTAT = FIELD_DP64(env->guest.CSR_ESTAT,
+                        CSR_ESTAT, ECODE, 0);
+                    env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                        CSR_CRMD, IE, 0);
+                    env->guest.CSR_CRMD = FIELD_DP64(env->guest.CSR_CRMD,
+                        CSR_CRMD, PLV, 0);
+
+                    uint32_t gvs = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, VS);
+                    uint64_t vec_size = gvs ? ((1ULL << gvs) * 4) : 0;
+                    uint32_t vector = 31 - __builtin_clz(gpending & genabled);
+                    env->pc = vec_size
+                        ? env->guest.CSR_EENTRY + (EXCCODE_EXTERNAL_INT + vector) * vec_size
+                        : env->guest.CSR_EENTRY;
+                    return true;
+                }
             }
             return false;
         }
 
         if (cpu_loongarch_hw_interrupts_enabled(env) &&
             cpu_loongarch_hw_interrupts_pending(env)) {
-            /* Raise it */
             cs->exception_index = EXCCODE_INT;
             loongarch_cpu_do_interrupt(cs);
             return true;

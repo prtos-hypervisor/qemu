@@ -23,14 +23,14 @@ static uint64_t constant_timer_initval(uint64_t value)
 
 uint64_t cpu_loongarch_get_constant_timer_counter(LoongArchCPU *cpu)
 {
-    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / TIMER_PERIOD;
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT) / TIMER_PERIOD;
 }
 
 uint64_t cpu_loongarch_get_constant_timer_ticks(LoongArchCPU *cpu)
 {
     uint64_t now, expire;
 
-    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
     expire = timer_expire_time_ns(&cpu->timer);
 
     return (expire - now) / TIMER_PERIOD;
@@ -45,7 +45,7 @@ void cpu_loongarch_store_constant_timer_config(LoongArchCPU *cpu,
 
     env->CSR_TCFG = value;
     if (value & CONSTANT_TIMER_ENABLE) {
-        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
         next = now + constant_timer_initval(value) * TIMER_PERIOD;
         timer_mod(&cpu->timer, next);
     } else {
@@ -61,7 +61,7 @@ void cpu_loongarch_store_guest_timer_config(LoongArchCPU *cpu,
     uint64_t now;
 
     if ((value & CONSTANT_TIMER_ENABLE) && initval) {
-        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
         env->guest_timer_deadline = now / TIMER_PERIOD + initval;
         timer_mod(&cpu->guest_timer, now + initval * TIMER_PERIOD);
     } else {
@@ -77,7 +77,7 @@ void loongarch_constant_timer_cb(void *opaque)
     uint64_t now, next;
 
     if (FIELD_EX64(env->CSR_TCFG, CSR_TCFG, PERIODIC)) {
-        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL_RT);
         next = now + constant_timer_initval(env->CSR_TCFG) * TIMER_PERIOD;
         timer_mod(&cpu->timer, next);
     } else {
