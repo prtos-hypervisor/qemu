@@ -85,10 +85,24 @@ bool cpu_loongarch_hw_interrupts_pending(CPULoongArchState *env)
     uint32_t pending;
     uint32_t status;
 
+    /* Always check host-level ESTAT - hardware interrupts (IPI, timer)
+     * are delivered here even when in guest mode. The hypervisor handles
+     * routing them to the guest. */
     pending = FIELD_EX64(env->CSR_ESTAT, CSR_ESTAT, IS);
-    status  = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
+    status = FIELD_EX64(env->CSR_ECFG, CSR_ECFG, LIE);
 
-    return (pending & status) != 0;
+    if ((pending & status) != 0) {
+        return true;
+    }
+
+    /* Also check guest-level interrupts when in guest mode */
+    if (env->in_guest_mode) {
+        pending = FIELD_EX64(env->guest.CSR_ESTAT, CSR_ESTAT, IS);
+        status = FIELD_EX64(env->guest.CSR_ECFG, CSR_ECFG, LIE);
+        return (pending & status) != 0;
+    }
+
+    return false;
 }
 #endif
 
@@ -321,6 +335,9 @@ static void loongarch_la464_initfn(Object *obj)
     data = FIELD_DP32(data, CPUCFG2, LLFTP_VER, 1);
     data = FIELD_DP32(data, CPUCFG2, LSPW, 1);
     data = FIELD_DP32(data, CPUCFG2, LAM, 1);
+    /* LVZ shim: advertise virtualization extension */
+    data = FIELD_DP32(data, CPUCFG2, LVZ, 1);
+    data = FIELD_DP32(data, CPUCFG2, LVZ_VER, 1);
     env->cpucfg[2] = data;
 
     data = 0;
@@ -729,8 +746,10 @@ static void loongarch_cpu_init(Object *obj)
 
     qdev_init_gpio_in(DEVICE(cpu), loongarch_cpu_set_irq, N_IRQS);
 #ifdef CONFIG_TCG
-    timer_init_ns(&cpu->timer, QEMU_CLOCK_VIRTUAL,
+    timer_init_ns(&cpu->timer, QEMU_CLOCK_VIRTUAL_RT,
                   &loongarch_constant_timer_cb, cpu);
+    timer_init_ns(&cpu->guest_timer, QEMU_CLOCK_VIRTUAL_RT,
+                  &loongarch_guest_timer_cb, cpu);
 #endif
 #endif
 }

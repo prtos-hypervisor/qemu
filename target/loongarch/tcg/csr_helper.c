@@ -178,3 +178,129 @@ target_ulong helper_csrwr_pwch(CPULoongArchState *env, target_ulong val)
     env->CSR_PWCH = val;
     return old_v;
  }
+
+target_ulong helper_csrwr_gstat(CPULoongArchState *env, target_ulong val)
+{
+    int64_t old_v = env->CSR_GSTAT;
+
+    env->CSR_GSTAT = val;
+    /*
+     * Do NOT update in_guest_mode here. The PVM bit is set by the
+     * hypervisor before ERTN, but we only want to enter guest mode
+     * at the ERTN boundary (in helper_ertn). Otherwise, host code
+     * between csrwr(GSTAT) and ertn would incorrectly generate GSPR.
+     */
+
+    return old_v;
+}
+
+target_ulong helper_csrwr_gintc(CPULoongArchState *env, target_ulong val)
+{
+    int64_t old_v = env->CSR_GINTC;
+    uint64_t estat_is = 0;
+    const uint64_t guest_irq_mask = ((1ULL << 13) - 1) & ~((1ULL << 5) - 1);
+    CPUState *cs = env_cpu(env);
+
+    env->CSR_GINTC = val;
+    env->guest_gintc = val;
+
+    /*
+     * When the hypervisor sets VIP (Virtual Interrupt Pending) bits,
+     * inject the corresponding interrupts into the guest's view of
+     * ESTAT so they are delivered on the next guest interrupt window.
+     *
+     * GINTC.VIP bits are ORed into ESTAT.IS (Interrupt Status).
+     * The hypervisor is responsible for clearing them after delivery.
+     */
+    uint64_t vip = FIELD_EX64(val, CSR_GINTC, VIP);
+
+    /*
+     * Keep the guest shadow ESTAT interrupt-status view aligned with the
+     * current VIP bitmap. We must clear the bits we previously virtualized
+     * when the hypervisor drops a VIP source, otherwise QEMU will continue
+     * to think the guest has a pending interrupt after TICLR/IPI clear.
+     */
+    if (vip & (1 << 0)) { estat_is |= (1ULL << 12); } /* IPI */
+    if (vip & (1 << 1)) { estat_is |= (1ULL << 11); } /* TI */
+    if (vip & (1 << 2)) { estat_is |= (1ULL << 10); } /* HW0 */
+    if (vip & (1 << 3)) { estat_is |= (1ULL << 9);  } /* HW1 */
+    if (vip & (1 << 4)) { estat_is |= (1ULL << 8);  } /* HW2 */
+    if (vip & (1 << 5)) { estat_is |= (1ULL << 7);  } /* HW3 */
+    if (vip & (1 << 6)) { estat_is |= (1ULL << 6);  } /* HW4 */
+    if (vip & (1 << 7)) { estat_is |= (1ULL << 5);  } /* HW5 */
+
+    env->guest.CSR_ESTAT &= ~guest_irq_mask;
+    env->guest.CSR_ESTAT |= estat_is;
+
+    /*
+     * Like RISC-V hvip: when VIP bits are set and guest interrupts are
+     * enabled, kick the CPU so exec_interrupt delivers the guest interrupt
+     * promptly instead of waiting for an arbitrary later TB boundary.
+     */
+    if (env->in_guest_mode && vip) {
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_EXITTB);
+    }
+
+    return old_v;
+}
+
+target_ulong helper_gcsrwr_ticlr(CPULoongArchState *env, target_ulong val)
+{
+    LoongArchCPU *cpu = env_archcpu(env);
+    uint64_t old_v = 0;
+
+    if (val & 0x1) {
+        uint64_t vip = FIELD_EX64(env->guest_gintc, CSR_GINTC, VIP);
+        vip &= ~(1ULL << 1);
+        helper_csrwr_gintc(env, FIELD_DP64(env->guest_gintc, CSR_GINTC, VIP, vip));
+
+        /* Re-arm the virtual guest deadline without touching host CSR_TCFG.
+         * The hypervisor owns physical timer programming; guest timer expiry
+         * is observed at TB boundaries and converted into a VM exit. */
+        if (env->guest.CSR_TCFG & 0x1UL) {
+            int64_t interval = FIELD_EX64(env->guest.CSR_TCFG,
+                                          CSR_TCFG, INIT_VAL);
+            if (interval) {
+                cpu_loongarch_store_guest_timer_config(cpu, env->guest.CSR_TCFG);
+            } else {
+                cpu_loongarch_store_guest_timer_config(cpu, 0);
+            }
+        }
+    }
+
+    return old_v;
+}
+
+target_ulong helper_gcsrwr_tcfg(CPULoongArchState *env, target_ulong val)
+{
+    LoongArchCPU *cpu = env_archcpu(env);
+    uint64_t old_v = env->guest.CSR_TCFG;
+
+    env->guest.CSR_TCFG = val;
+    if (val & 0x1UL) {
+        int64_t interval = FIELD_EX64(val, CSR_TCFG, INIT_VAL);
+        if (interval) {
+            cpu_loongarch_store_guest_timer_config(cpu, val);
+        } else {
+            cpu_loongarch_store_guest_timer_config(cpu, 0);
+        }
+    } else {
+        cpu_loongarch_store_guest_timer_config(cpu, 0);
+    }
+
+    return old_v;
+}
+
+target_ulong helper_gcsrwr_crmd(CPULoongArchState *env, target_ulong val)
+{
+    uint64_t old_v = env->guest.CSR_CRMD;
+    uint8_t old_da = FIELD_EX64(old_v, CSR_CRMD, DA);
+
+    env->guest.CSR_CRMD = val;
+
+    if (old_da != FIELD_EX64(val, CSR_CRMD, DA)) {
+        tlb_flush(env_cpu(env));
+    }
+
+    return old_v;
+}

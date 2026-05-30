@@ -93,6 +93,9 @@ FIELD(FCSR0, CAUSE, 24, 5)
 #define  EXCCODE_WPEM                EXCODE(19, 1)
 #define  EXCCODE_BTD                 EXCODE(20, 0)
 #define  EXCCODE_BTE                 EXCODE(21, 0)
+#define  EXCCODE_GSPR                EXCODE(22, 0) /* Guest Sensitive Privileged Resource */
+#define  EXCCODE_HVC                 EXCODE(23, 0) /* HyperVisor Call */
+#define  EXCCODE_GCM                 EXCODE(22, 1) /* Guest CSR Modified */
 #define  EXCCODE_DBP                 EXCODE(26, 0) /* Reserved subcode used for debug */
 
 /* cpucfg[0] bits */
@@ -255,6 +258,7 @@ FIELD(TLB_MISC, E, 0, 1)
 FIELD(TLB_MISC, ASID, 1, 10)
 FIELD(TLB_MISC, VPPN, 13, 35)
 FIELD(TLB_MISC, PS, 48, 6)
+FIELD(TLB_MISC, GID, 54, 8)   /* LVZ: Guest ID tag */
 
 /*Msg interrupt registers */
 #define N_MSGIS                4
@@ -291,6 +295,36 @@ struct LoongArchTLB {
     uint64_t tlb_entry1;
 };
 typedef struct LoongArchTLB LoongArchTLB;
+
+/*
+ * Root TLB for stage-2 (GPA->HPA) translation.
+ *
+ * In LoongArch LVZ, the root TLB is a separate TLB hierarchy that
+ * translates Guest Physical Addresses (GPA) to Host Physical Addresses
+ * (HPA).  Entries are tagged with a Guest ID (GID) so that different
+ * guest partitions can share the same root TLB structure without
+ * leaking address mappings across VM boundaries.
+ *
+ * The root TLB is much smaller than the primary TLB (64 entries is
+ * typical for hardware) and is backed by a software page-table walker
+ * that reads the hypervisor's stage-2 page tables from guest memory.
+ */
+#define LOONGARCH_ROOT_TLB_SIZE  64
+
+typedef struct {
+    uint64_t gpa_start;   /* Guest Physical Address page-aligned start */
+    uint64_t gpa_end;     /* Guest Physical Address end (exclusive) */
+    uint64_t hpa;         /* Host Physical Address page-aligned base */
+    uint64_t gid;         /* Guest ID (GSTAT.GID at VM entry) */
+    uint32_t ps;          /* Page-size encoding (same as TLBIDX.PS) */
+    uint32_t flags;       /* V(0), D(1), PLV(2:3), MAT(4:5), G(6) */
+} LoongArchRootTLBEntry;
+
+typedef struct {
+    LoongArchRootTLBEntry entries[LOONGARCH_ROOT_TLB_SIZE];
+    int next_victim;       /* Round-robin replacement pointer */
+    int count;             /* Number of valid entries */
+} LoongArchRootTLBState;
 #endif
 
 enum loongarch_features {
@@ -393,6 +427,80 @@ typedef struct CPUArchState {
     uint64_t CSR_MSGIS[N_MSGIS];
     uint64_t CSR_MSGIR;
     uint64_t CSR_MSGIE;
+    /* LVZ (LoongArch Virtualization) host CSRs */
+    uint64_t CSR_GTLBC;
+    uint64_t CSR_GSTAT;
+    uint64_t CSR_GCFG;
+    uint64_t CSR_GINTC;
+
+    /* LVZ guest CSR shadow (saved/restored on VM entry/exit) */
+    struct {
+        uint64_t CSR_CRMD;
+        uint64_t CSR_PRMD;
+        uint64_t CSR_EUEN;
+        uint64_t CSR_ECFG;
+        uint64_t CSR_ESTAT;
+        uint64_t CSR_ERA;
+        uint64_t CSR_BADV;
+        uint64_t CSR_BADI;
+        uint64_t CSR_EENTRY;
+        uint64_t CSR_TLBIDX;
+        uint64_t CSR_TLBEHI;
+        uint64_t CSR_TLBELO0;
+        uint64_t CSR_TLBELO1;
+        uint64_t CSR_ASID;
+        uint64_t CSR_PGDL;
+        uint64_t CSR_PGDH;
+        uint64_t CSR_PWCL;
+        uint64_t CSR_PWCH;
+        uint64_t CSR_STLBPS;
+        uint64_t CSR_RVACFG;
+        uint64_t CSR_CPUID;
+        uint64_t CSR_PRCFG1;
+        uint64_t CSR_PRCFG2;
+        uint64_t CSR_PRCFG3;
+        uint64_t CSR_SAVE[16];
+        uint64_t CSR_TID;
+        uint64_t CSR_TCFG;
+        uint64_t CSR_TVAL;
+        uint64_t CSR_CNTC;
+        uint64_t CSR_TICLR;
+        uint64_t CSR_LLBCTL;
+        uint64_t CSR_TLBRENTRY;
+        uint64_t CSR_TLBRBADV;
+        uint64_t CSR_TLBRERA;
+        uint64_t CSR_TLBRSAVE;
+        uint64_t CSR_TLBRELO0;
+        uint64_t CSR_TLBRELO1;
+        uint64_t CSR_TLBREHI;
+        uint64_t CSR_TLBRPRMD;
+        uint64_t CSR_DMW[4];
+        uint64_t CSR_MISC;
+    } guest;
+    /* Is CPU in guest (PVM) mode? Cached from CSR_GSTAT.PVM for fast check */
+    bool in_guest_mode;
+    /* Count of TB starts since last VM entry. */
+    uint32_t guest_tb_count;
+    /*
+     * LVZ: Guest counter offset (GCNT virtualization).
+     *
+     * When the guest reads CSR_CNTC, return host_stable_counter - offset.
+     * This gives the guest a virtualized time base that can be skewed
+     * relative to the host for save/restore and migration purposes.
+     * Updated on VM entry to reflect the difference between host and
+     * guest view of time.
+     */
+    uint64_t guest_timer_offset;
+    /* Absolute virtual-clock tick deadline for the optional direct guest timer. */
+    uint64_t guest_timer_deadline;
+    /*
+     * LVZ: Cached Guest INterrupt Control state.
+     *
+     * Mirrors CSR_GINTC for fast access during virtual interrupt
+     * injection.  VIP bits set here are ORed into the guest's ESTAT
+     * during VM entry and when the guest reads CSR_ESTAT.
+     */
+    uint64_t guest_gintc;
     struct {
         uint64_t guest_addr;
     } stealtime;
@@ -410,6 +518,8 @@ typedef struct CPUArchState {
 #ifndef CONFIG_USER_ONLY
 #ifdef CONFIG_TCG
     LoongArchTLB  tlb[LOONGARCH_TLB_MAX];
+    /* Root TLB for stage-2 GPA->HPA translation (LVZ) */
+    LoongArchRootTLBState root_tlb;
 #endif
 
     AddressSpace *address_space_iocsr;
@@ -434,6 +544,7 @@ struct ArchCPU {
 
     CPULoongArchState env;
     QEMUTimer timer;
+    QEMUTimer guest_timer;
     uint32_t  phy_id;
     OnOffAuto lbt;
     OnOffAuto pmu;
@@ -480,6 +591,12 @@ struct LoongArchCPUClass {
 #define MMU_KERNEL_IDX   MMU_PLV_KERNEL
 #define MMU_USER_IDX     MMU_PLV_USER
 #define MMU_DA_IDX       4
+/* LVZ: Guest mode MMU indices for two-level address translation.
+ * When PVM=1, guest virtual addresses go through guest TLB first
+ * (GVA->GPA), then through root TLB (GPA->HPA). */
+#define MMU_GUEST_PLV0   5
+#define MMU_GUEST_PLV3   6
+#define MMU_IDX_NUM      7
 
 static inline bool is_la64(CPULoongArchState *env)
 {
@@ -515,6 +632,7 @@ static inline void set_pc(CPULoongArchState *env, uint64_t value)
 #define HW_FLAGS_CRMD_PG    R_CSR_CRMD_PG_MASK   /* 0x10 */
 #define HW_FLAGS_VA32       0x20
 #define HW_FLAGS_EUEN_ASXE  0x40
+#define HW_FLAGS_PVM        0x80  /* Guest (PVM) mode active */
 
 #define CPU_RESOLVING_TYPE TYPE_LOONGARCH_CPU
 

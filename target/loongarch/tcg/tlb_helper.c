@@ -24,6 +24,27 @@
 
 typedef bool (*tlb_match)(bool global, int asid, int tlb_asid);
 
+static uint64_t current_tlb_gid(CPULoongArchState *env)
+{
+    if (FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, USETGID)) {
+        return FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, TGID);
+    }
+
+    if (env->in_guest_mode) {
+        return FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, GID);
+    }
+
+    return 0;
+}
+
+static uint16_t current_tlb_asid(CPULoongArchState *env)
+{
+    return (env->in_guest_mode ||
+            FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, USETGID)) ?
+           FIELD_EX64(env->guest.CSR_ASID, CSR_ASID, ASID) :
+           FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+}
+
 static bool tlb_match_any(bool global, int asid, int tlb_asid)
 {
     return global || tlb_asid == asid;
@@ -32,6 +53,19 @@ static bool tlb_match_any(bool global, int asid, int tlb_asid)
 static bool tlb_match_asid(bool global, int asid, int tlb_asid)
 {
     return !global && tlb_asid == asid;
+}
+
+/*
+ * LVZ: Return the host or guest CSR value depending on the current mode.
+ * In guest (PVM) mode the guest's shadow CSR is returned; in host mode
+ * the real hardware CSR is returned.  Reduces if/else duplication across
+ * the TLB helper hot paths (sptw_prepare_context, helper_tlbwr,
+ * helper_tlbfill).
+ */
+static inline uint64_t guest_csr64(CPULoongArchState *env,
+                                   uint64_t host_val, uint64_t guest_val)
+{
+    return env->in_guest_mode ? guest_val : host_val;
 }
 
 bool check_ps(CPULoongArchState *env, uint8_t tlb_ps)
@@ -114,7 +148,7 @@ static void invalidate_tlb_entry(CPULoongArchState *env, int index)
     target_ulong addr, mask, pagesize;
     uint8_t tlb_ps;
     LoongArchTLB *tlb = &env->tlb[index];
-    int idxmap = BIT(MMU_KERNEL_IDX) | BIT(MMU_USER_IDX);
+    int idxmap = BIT(MMU_KERNEL_IDX) | BIT(MMU_USER_IDX) | BIT(MMU_GUEST_PLV0) | BIT(MMU_GUEST_PLV3);
     uint64_t tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
     bool tlb_v;
 
@@ -143,7 +177,7 @@ static void invalidate_tlb(CPULoongArchState *env, int index)
     uint16_t csr_asid, tlb_asid, tlb_g;
     uint8_t tlb_e;
 
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     tlb = &env->tlb[index];
     tlb_e = FIELD_EX64(tlb->tlb_misc, TLB_MISC, E);
     if (!tlb_e) {
@@ -166,24 +200,33 @@ static void sptw_prepare_context(CPULoongArchState *env, MMUContext *context)
     uint64_t lo0, lo1, csr_vppn;
     uint8_t csr_ps;
 
-    if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
-        csr_ps = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI, PS);
+    uint64_t tlbrera  = guest_csr64(env, env->CSR_TLBRERA,  env->guest.CSR_TLBRERA);
+    uint64_t tlbrehi  = guest_csr64(env, env->CSR_TLBREHI,  env->guest.CSR_TLBREHI);
+    uint64_t tlbehi   = guest_csr64(env, env->CSR_TLBEHI,   env->guest.CSR_TLBEHI);
+    uint64_t tlbidx   = guest_csr64(env, env->CSR_TLBIDX,   env->guest.CSR_TLBIDX);
+    uint64_t tlbrelo0 = guest_csr64(env, env->CSR_TLBRELO0, env->guest.CSR_TLBRELO0);
+    uint64_t tlbrelo1 = guest_csr64(env, env->CSR_TLBRELO1, env->guest.CSR_TLBRELO1);
+    uint64_t tlbelo0  = guest_csr64(env, env->CSR_TLBELO0,  env->guest.CSR_TLBELO0);
+    uint64_t tlbelo1  = guest_csr64(env, env->CSR_TLBELO1,  env->guest.CSR_TLBELO1);
+
+    if (FIELD_EX64(tlbrera, CSR_TLBRERA, ISTLBR)) {
+        csr_ps = FIELD_EX64(tlbrehi, CSR_TLBREHI, PS);
         if (is_la64(env)) {
-            csr_vppn = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI_64, VPPN);
+            csr_vppn = FIELD_EX64(tlbrehi, CSR_TLBREHI_64, VPPN);
         } else {
-            csr_vppn = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI_32, VPPN);
+            csr_vppn = FIELD_EX64(tlbrehi, CSR_TLBREHI_32, VPPN);
         }
-        lo0 = env->CSR_TLBRELO0;
-        lo1 = env->CSR_TLBRELO1;
+        lo0 = tlbrelo0;
+        lo1 = tlbrelo1;
     } else {
-        csr_ps = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, PS);
+        csr_ps = FIELD_EX64(tlbidx, CSR_TLBIDX, PS);
         if (is_la64(env)) {
-            csr_vppn = FIELD_EX64(env->CSR_TLBEHI, CSR_TLBEHI_64, VPPN);
+            csr_vppn = FIELD_EX64(tlbehi, CSR_TLBEHI_64, VPPN);
         } else {
-            csr_vppn = FIELD_EX64(env->CSR_TLBEHI, CSR_TLBEHI_32, VPPN);
+            csr_vppn = FIELD_EX64(tlbehi, CSR_TLBEHI_32, VPPN);
         }
-        lo0 = env->CSR_TLBELO0;
-        lo1 = env->CSR_TLBELO1;
+        lo0 = tlbelo0;
+        lo1 = tlbelo1;
     }
 
     context->ps = csr_ps;
@@ -208,8 +251,10 @@ static void fill_tlb_entry(CPULoongArchState *env, LoongArchTLB *tlb,
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, PS, csr_ps);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, VPPN, csr_vppn);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 1);
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, ASID, csr_asid);
+    tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, GID,
+                               current_tlb_gid(env));
 
     tlb->tlb_entry0 = lo0;
     tlb->tlb_entry1 = lo1;
@@ -240,7 +285,9 @@ static LoongArchTLB *loongarch_tlb_search_cb(CPULoongArchState *env,
     uint8_t tlb_e, tlb_ps, stlb_ps;
     bool tlb_g;
     int i, compare_shift;
-    uint64_t vpn, tlb_vppn;
+    uint64_t vpn, tlb_vppn, csr_gid, tlb_gid;
+
+    csr_gid = current_tlb_gid(env);
 
     stlb_ps = FIELD_EX64(env->CSR_STLBPS, CSR_STLBPS, PS);
     vpn = (vaddr & TARGET_VIRT_MASK) >> (stlb_ps + 1);
@@ -254,9 +301,11 @@ static LoongArchTLB *loongarch_tlb_search_cb(CPULoongArchState *env,
         if (tlb_e) {
             tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
             tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
+            tlb_gid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, GID);
             tlb_g = !!FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
 
-            if (func(tlb_g, csr_asid, tlb_asid) &&
+            if (tlb_gid == csr_gid &&
+                func(tlb_g, csr_asid, tlb_asid) &&
                 (vpn == (tlb_vppn >> compare_shift))) {
                 return tlb;
             }
@@ -271,10 +320,12 @@ static LoongArchTLB *loongarch_tlb_search_cb(CPULoongArchState *env,
             tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
             tlb_ps = FIELD_EX64(tlb->tlb_misc, TLB_MISC, PS);
             tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
+            tlb_gid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, GID);
             tlb_g = FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
             compare_shift = tlb_ps + 1 - R_TLB_MISC_VPPN_SHIFT;
             vpn = (vaddr & TARGET_VIRT_MASK) >> (tlb_ps + 1);
-            if (func(tlb_g, csr_asid, tlb_asid) &&
+            if (tlb_gid == csr_gid &&
+                func(tlb_g, csr_asid, tlb_asid) &&
                 (vpn == (tlb_vppn >> compare_shift))) {
                 return tlb;
             }
@@ -291,7 +342,7 @@ static bool loongarch_tlb_search(CPULoongArchState *env, vaddr vaddr,
     LoongArchTLB *tlb;
 
     func = tlb_match_any;
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     tlb = loongarch_tlb_search_cb(env, vaddr, csr_asid, func);
     if (tlb) {
         *index = tlb - env->tlb;
@@ -378,17 +429,213 @@ static void update_tlb_index(CPULoongArchState *env, MMUContext *context,
     *old = new;
 }
 
+
+/* ================================================================
+ *  LVZ Root TLB (Stage-2) implementation
+ *
+ *  The Root TLB caches GPA->HPA translations for the current guest.
+ *  On a miss, the stage-2 page-table walker reads the hypervisor's
+ *  TLB refill table from guest-physical memory (address in CSR_SAVE4).
+ *
+ *  Each entry is tagged with GID (GSTAT.GID) to isolate different
+ *  guest partitions.  The replacement policy is round-robin.
+ * ================================================================ */
+
+/*
+ * Look up a GPA in the Root TLB.
+ * Returns HPA on hit, or ~0ULL on miss.
+ */
+static uint64_t root_tlb_lookup(CPULoongArchState *env, uint64_t gpa,
+                                 uint64_t gid)
+{
+    LoongArchRootTLBState *rt = &env->root_tlb;
+    for (int i = 0; i < rt->count; i++) {
+        LoongArchRootTLBEntry *e = &rt->entries[i];
+        if ((e->flags & 1) &&               /* V bit */
+            e->gid == gid &&                /* GID match */
+            gpa >= e->gpa_start &&
+            gpa < e->gpa_end) {
+            uint64_t offset = gpa - e->gpa_start;
+            return e->hpa + offset;
+        }
+    }
+    return ~0ULL; /* Miss */
+}
+
+/*
+ * Insert a Root TLB entry with round-robin replacement.
+ */
+static void root_tlb_insert(CPULoongArchState *env,
+                             uint64_t gpa_start, uint64_t gpa_end,
+                             uint64_t hpa, uint32_t ps,
+                             uint64_t gid, uint32_t flags)
+{
+    LoongArchRootTLBState *rt = &env->root_tlb;
+    int idx;
+
+    if (rt->count < LOONGARCH_ROOT_TLB_SIZE) {
+        idx = rt->count++;
+    } else {
+        idx = rt->next_victim;
+        rt->next_victim = (rt->next_victim + 1) % LOONGARCH_ROOT_TLB_SIZE;
+    }
+
+    LoongArchRootTLBEntry *e = &rt->entries[idx];
+    e->gpa_start = gpa_start;
+    e->gpa_end   = gpa_end;
+    e->hpa       = hpa;
+    e->ps        = ps;
+    e->gid       = gid;
+    e->flags     = flags;
+
+    /* Keep victim pointer moving in round-robin */
+    if (rt->count == LOONGARCH_ROOT_TLB_SIZE) {
+        rt->next_victim = (idx + 1) % LOONGARCH_ROOT_TLB_SIZE;
+    }
+}
+
+/*
+ * Flush (invalidate) the entire Root TLB.
+ * Called on VM entry (new guest context) or when the hypervisor
+ * switches partitions.
+ */
+void loongarch_root_tlb_flush(CPULoongArchState *env)
+{
+    LoongArchRootTLBState *rt = &env->root_tlb;
+    memset(rt->entries, 0, sizeof(rt->entries));
+    rt->count = 0;
+    rt->next_victim = 0;
+}
+
+/*
+ * Stage-2 page-table walker: reads the hypervisor's TLB refill table
+ * from guest-physical memory and caches the result in the Root TLB.
+ *
+ * The hypervisor stores its per-CPU tlb_refill_table PA in CSR_SAVE4.
+ * Each entry is a 64-bit value:
+ *   [63:0] = (HPA_PPN << 20) | flags  (0 if the page is not mapped)
+ *
+ * Returns HPA, or ~0ULL if the GPA is unmapped.
+ */
+static uint64_t root_tlb_walk_stage2(CPULoongArchState *env, uint64_t gpa,
+                                      uint64_t gid)
+{
+    uint64_t table_pa = env->CSR_SAVE[4];
+    if (!table_pa) {
+        return gpa & 0x0000FFFFFFFFFFFFULL; /* Identity fallback */
+    }
+
+    /* 1MB page index */
+    uint32_t page_idx = (uint32_t)(gpa >> 20);
+    if (page_idx >= 4096) {
+        return ~0ULL; /* GPA above 4 GB */
+    }
+
+    /* Read entry from guest-physical memory */
+    uint64_t entry;
+    cpu_physical_memory_read(table_pa + page_idx * 8, &entry, sizeof(entry));
+
+    if (!(entry & 1ULL)) {
+        return ~0ULL; /* Invalid */
+    }
+
+    /* Extract HPA, flags, and page offset */
+    uint64_t hpa_ppn = (entry >> 20) << 20;
+    uint32_t flags = entry & 0xFFFFF;
+    uint32_t ps = 20; /* 1MB page size */
+    uint64_t gpa_base = (uint64_t)page_idx << 20;
+    uint64_t gpa_end  = gpa_base + (1ULL << 20);
+
+    /* Populate root TLB cache */
+    root_tlb_insert(env, gpa_base, gpa_end, hpa_ppn, ps, gid, flags);
+
+    uint64_t gpa_offset = gpa & 0xFFFFFULL;
+    return hpa_ppn + gpa_offset;
+}
+
+/*
+ * LVZ: Translate Guest Physical Address to Host Physical Address.
+ *
+ * Checks the Root TLB first (with GID match), then falls back to the
+ * stage-2 page-table walker on miss.  The result is cached for future
+ * lookups.
+ */
+uint64_t loongarch_root_tlb_translate(CPULoongArchState *env, uint64_t gpa)
+{
+    uint64_t gid = FIELD_EX64(env->CSR_GSTAT, CSR_GSTAT, GID);
+
+    /* Fast path: Root TLB hit */
+    uint64_t hpa = root_tlb_lookup(env, gpa, gid);
+    if (hpa != ~0ULL) {
+        return hpa;
+    }
+
+    /* Slow path: walk stage-2 page tables */
+    hpa = root_tlb_walk_stage2(env, gpa, gid);
+
+    /* On miss, return GPA identity as a fallback
+     * (avoids crashing early-boot guests that touch unmapped GPA) */
+    if (hpa == ~0ULL) {
+        hpa = gpa & 0x0000FFFFFFFFFFFFULL;
+    }
+
+    return hpa;
+}
+
+/*
+ * LVZ: Translate Guest Physical Address to Host Physical Address.
+ * (wrapper for use by lvz_translate_tlbelo)
+ */
+static uint64_t lvz_gpa_to_hpa(CPULoongArchState *env, uint64_t gpa)
+{
+    return loongarch_root_tlb_translate(env, gpa);
+}
+
+/*
+ * LVZ: Translate guest TLBELO entries (GPA -> HPA) before filling
+ * the real TLB. This is called from helper_tlbwr/helper_tlbfill
+ * when in guest (PVM) mode.
+ */
+static void lvz_translate_tlbelo(CPULoongArchState *env,
+                                  uint64_t *elo0, uint64_t *elo1)
+{
+    if (!env->in_guest_mode) {
+        return;
+    }
+
+    /* Translate GPA to HPA for each valid entry */
+    if (pte_present(env, *elo0)) {
+        uint64_t gpa_ppn = (*elo0 >> 12) & ((1ULL << 36) - 1);
+        uint64_t gpa = gpa_ppn << 12;
+        uint64_t hpa = lvz_gpa_to_hpa(env, gpa);
+        uint64_t hpa_ppn = hpa >> 12;
+        /* Replace PPN with HPA PPN, keep flags (low 12 bits + high 3 bits) */
+        *elo0 = (hpa_ppn << 12) | (*elo0 & 0xFFFULL) | (*elo0 & (7ULL << 61));
+    }
+    if (pte_present(env, *elo1)) {
+        uint64_t gpa_ppn = (*elo1 >> 12) & ((1ULL << 36) - 1);
+        uint64_t gpa = gpa_ppn << 12;
+        uint64_t hpa = lvz_gpa_to_hpa(env, gpa);
+        uint64_t hpa_ppn = hpa >> 12;
+        *elo1 = (hpa_ppn << 12) | (*elo1 & 0xFFFULL) | (*elo1 & (7ULL << 61));
+    }
+}
+
 void helper_tlbwr(CPULoongArchState *env)
 {
-    int index = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, INDEX);
+    uint64_t tlbidx = guest_csr64(env, env->CSR_TLBIDX, env->guest.CSR_TLBIDX);
+    int index = FIELD_EX64(tlbidx, CSR_TLBIDX, INDEX);
+
     MMUContext context;
 
-    if (FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, NE)) {
+    if (FIELD_EX64(tlbidx, CSR_TLBIDX, NE)) {
         invalidate_tlb(env, index);
         return;
     }
 
     sptw_prepare_context(env, &context);
+    /* LVZ: Translate guest TLBELO entries (GPA->HPA) */
+    lvz_translate_tlbelo(env, &context.pte_buddy[0], &context.pte_buddy[1]);
     update_tlb_index(env, &context, index);
 }
 
@@ -403,7 +650,7 @@ static int get_tlb_random_index(CPULoongArchState *env, vaddr addr,
 
     /* Validity of stlb_ps is checked in helper_csrwr_stlbps() */
     stlb_ps = FIELD_EX64(env->CSR_STLBPS, CSR_STLBPS, PS);
-    asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    asid = current_tlb_asid(env);
     if (pagesize == stlb_ps) {
         /* Only write into STLB bits [47:13] */
         address = addr & ~MAKE_64BIT_MASK(0, R_CSR_TLBEHI_64_VPPN_SHIFT);
@@ -462,14 +709,22 @@ void helper_tlbfill(CPULoongArchState *env)
     int index, pagesize;
     MMUContext context;
 
-    if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
-        entryhi = env->CSR_TLBREHI;
-        /* Validity of pagesize is checked in helper_ldpte() */
-        pagesize = FIELD_EX64(env->CSR_TLBREHI, CSR_TLBREHI, PS);
+    /*
+     * LVZ: use guest shadow CSRs when in PVM (guest) mode so that
+     * tlbfill translates the guest's GPA to HPA.  The guest_csr64()
+     * helper selects the host or guest CSR set transparently.
+     */
+    uint64_t tlbrera = guest_csr64(env, env->CSR_TLBRERA, env->guest.CSR_TLBRERA);
+    uint64_t tlbrehi = guest_csr64(env, env->CSR_TLBREHI, env->guest.CSR_TLBREHI);
+    uint64_t tlbidx  = guest_csr64(env, env->CSR_TLBIDX,  env->guest.CSR_TLBIDX);
+    uint64_t tlbehi  = guest_csr64(env, env->CSR_TLBEHI,  env->guest.CSR_TLBEHI);
+
+    if (FIELD_EX64(tlbrera, CSR_TLBRERA, ISTLBR)) {
+        entryhi = tlbrehi;
+        pagesize = FIELD_EX64(tlbrehi, CSR_TLBREHI, PS);
     } else {
-        entryhi = env->CSR_TLBEHI;
-        /* Validity of pagesize is checked in helper_tlbrd() */
-        pagesize = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, PS);
+        entryhi = tlbehi;
+        pagesize = FIELD_EX64(tlbidx, CSR_TLBIDX, PS);
     }
 
     sptw_prepare_context(env, &context);
@@ -484,7 +739,7 @@ void helper_tlbclr(CPULoongArchState *env)
     int i, index;
     uint16_t csr_asid, tlb_asid, tlb_g;
 
-    csr_asid = FIELD_EX64(env->CSR_ASID, CSR_ASID, ASID);
+    csr_asid = current_tlb_asid(env);
     index = FIELD_EX64(env->CSR_TLBIDX, CSR_TLBIDX, INDEX);
 
     if (index < LOONGARCH_STLB) {
@@ -848,4 +1103,92 @@ TLBRet loongarch_get_addr_from_tlb(CPULoongArchState *env,
     }
 
     return TLBRET_NOMATCH;
+}
+
+/*
+ * LVZ: Two-level address translation for guest (PVM) mode.
+ *
+ * When PVM=1, guest virtual addresses must be translated twice:
+ *   Level 1 (GVA -> GPA): Use guest TLB (env->guest.CSR_TLB*)
+ *   Level 2 (GPA -> HPA): Use root TLB (env->tlb[] with GID tagging)
+ *
+ * For now, Level 2 is a direct 1:1 mapping (GPA == HPA) since the
+ * hypervisor configures identity-mapped guest physical memory.
+ * Full root TLB support can be added later.
+ */
+TLBRet loongarch_lvz_translate(CPULoongArchState *env, vaddr addr,
+                                MMUAccessType access_type, int mmu_idx,
+                                hwaddr *phys_addr)
+{
+    /* Level 1: GVA -> GPA using guest TLB shadow state.
+     * The guest TLB entries are in env->guest.CSR_TLB* which were
+     * written by the guest kernel via shadow CSR optimization.
+     * We need to search the guest TLB for a matching entry. */
+    uint64_t guest_vppn, guest_ps, guest_elo0, guest_elo1;
+    uint64_t gpa = addr; /* Default: identity map if no guest TLB match */
+
+    /* Check if guest has page mapping enabled via shadow CRMD */
+    uint64_t guest_crmd = env->guest.CSR_CRMD;
+    if (!(guest_crmd & (1ULL << 4))) {
+        /* PG=0: direct address mode, VA=GPA */
+        *phys_addr = addr & 0x0000FFFFFFFFFFFFULL;
+        return TLBRET_MATCH;
+    }
+
+    /* Read guest TLB registers from shadow state */
+    guest_ps = FIELD_EX64(env->guest.CSR_STLBPS, CSR_STLBPS, PS);
+    guest_vppn = addr >> (guest_ps + 1);
+
+    /* Simple guest TLB lookup: iterate over guest TLB entries.
+     * For a full implementation, we would maintain a separate guest_tlb[]
+     * array. For now, we use the guest CSR shadow state directly.
+     * The guest kernel fills TLB entries via tlbfill/tlbwr which trap
+     * to the hypervisor, so the shadow CSRs reflect the last TLB operation. */
+
+    /* Check if the address matches the last guest TLB operation */
+    uint64_t gtlbehi_vppn;
+    if (FIELD_EX64(env->CSR_TLBRERA, CSR_TLBRERA, ISTLBR)) {
+        gtlbehi_vppn = FIELD_EX64(env->guest.CSR_TLBREHI, CSR_TLBREHI, PS);
+        /* Use TLBR* registers for refill context */
+        guest_elo0 = env->guest.CSR_TLBRELO0;
+        guest_elo1 = env->guest.CSR_TLBRELO1;
+    } else {
+        gtlbehi_vppn = FIELD_EX64(env->guest.CSR_TLBEHI, CSR_TLBEHI_64, VPPN);
+        guest_elo0 = env->guest.CSR_TLBELO0;
+        guest_elo1 = env->guest.CSR_TLBELO1;
+    }
+
+    /* Level 2: GPA -> HPA (identity mapping for now).
+     * The hypervisor configures the partition memory as identity-mapped,
+     * so GPA == HPA for all valid partition addresses. */
+    if (pte_present(env, guest_elo0) || pte_present(env, guest_elo1)) {
+        /* Extract GPA from guest TLBELO: PPN is bits [47:12] */
+        uint64_t gpa_ppn;
+        int odd = (addr >> guest_ps) & 1;
+        uint64_t elo = odd ? guest_elo1 : guest_elo0;
+
+        if (!pte_present(env, elo)) {
+            return TLBRET_INVALID;
+        }
+
+        gpa_ppn = (elo >> 12) & ((1ULL << 36) - 1);
+        gpa = (gpa_ppn << 12) | (addr & ((1ULL << guest_ps) - 1));
+
+        /* Check D bit for writes */
+        if (access_type == MMU_DATA_STORE && !(elo & (1ULL << 1))) {
+            return TLBRET_DIRTY;
+        }
+        /* Check NX bit for instruction fetch */
+        if (access_type == MMU_INST_FETCH && (elo & (1ULL << 62))) {
+            return TLBRET_XI;
+        }
+        /* Check NR bit for reads */
+        if (access_type == MMU_DATA_LOAD && (elo & (1ULL << 61))) {
+            return TLBRET_RI;
+        }
+    }
+
+    /* Level 2: GPA -> HPA (identity mapping) */
+    *phys_addr = gpa & 0x0000FFFFFFFFFFFFULL;
+    return TLBRET_MATCH;
 }

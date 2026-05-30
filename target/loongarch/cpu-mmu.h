@@ -48,6 +48,10 @@ static inline bool pte_present(CPULoongArchState *env, uint64_t entry)
     return !!present;
 }
 
+/* LVZ Root TLB (stage-2) API */
+void loongarch_root_tlb_flush(CPULoongArchState *env);
+uint64_t loongarch_root_tlb_translate(CPULoongArchState *env, uint64_t gpa);
+
 static inline bool pte_write(CPULoongArchState *env, uint64_t entry)
 {
     uint8_t writable;
@@ -100,4 +104,9 @@ void get_dir_base_width(CPULoongArchState *env, uint64_t *dir_base,
 hwaddr loongarch_cpu_get_phys_addr_debug(CPUState *cpu, vaddr addr);
 uint64_t loongarch_palen_mask(CPULoongArchState *env);
 
+
+/* LVZ: Two-level address translation for guest mode */
+TLBRet loongarch_lvz_translate(CPULoongArchState *env, vaddr addr,
+                                MMUAccessType access_type, int mmu_idx,
+                                hwaddr *phys_addr);
 #endif  /* LOONGARCH_CPU_MMU_H */

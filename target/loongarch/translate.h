@@ -66,6 +66,7 @@ typedef struct DisasContext {
     TCGv zero;
     bool la64; /* LoongArch64 mode */
     bool va32; /* 32-bit virtual address */
+    bool pvm;  /* Guest (PVM) mode - LVZ */
     uint32_t cpucfg1;
     uint32_t cpucfg2;
     uint32_t cpucfg3;
