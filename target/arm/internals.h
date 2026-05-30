@@ -258,6 +258,9 @@ FIELD(VSTCR, SA, 30, 1)
 #define HCRX_TCR2EN   (1ULL << 14)
 #define HCRX_SCTLR2EN (1ULL << 15)
 #define HCRX_GCSEN    (1ULL << 22)
+#define HCRX_ENFPM    (1ULL << 23)
+#define HCRX_PACMEN   (1ULL << 24)
+#define HCRX_SRMASKEN (1ULL << 26)
 
 #define HPFAR_NS      (1ULL << 63)
 
@@ -289,6 +292,16 @@ FIELD(CNTHCTL, EL1NVVCT, 16, 1)
 FIELD(CNTHCTL, EVNTIS, 17, 1)
 FIELD(CNTHCTL, CNTVMASK, 18, 1)
 FIELD(CNTHCTL, CNTPMASK, 19, 1)
+
+FIELD(FPMR, F8S1, 0, 3)
+FIELD(FPMR, F8S2, 3, 3)
+FIELD(FPMR, F8D, 6, 3)
+FIELD(FPMR, OSM, 14, 1)
+FIELD(FPMR, OSC, 15, 1)
+FIELD(FPMR, LSCALE, 16, 7)
+FIELD(FPMR, NSCALE, 24, 8)
+FIELD(FPMR, NSCALE_F16, 24, 5)
+FIELD(FPMR, LSCALE2, 32, 6)
 
 /* We use a few fake FSR values for internal purposes in M profile.
  * M profile cores don't have A/R format FSRs, but currently our
@@ -879,6 +892,16 @@ static inline uint32_t arm_fi_to_lfsc(ARMMMUFaultInfo *fi)
     case ARMFault_Permission:
         assert(fi->level >= 0 && fi->level <= 3);
         fsc = 0b001100 | fi->level;
+        break;
+    case ARMFault_Domain:
+        /*
+         * This can only happen when doing an AT insn at EL2 for an AArch32
+         * stage 1 EL1&0 translation regime using short-descriptors, and
+         * the translation hits a Domain fault. This needs to be reported in
+         * the long-format PAR. Compare pseudocode AArch64_PARFaultStatus().
+         */
+        assert(fi->level == 1 || fi->level == 2);
+        fsc = 0b111100 | fi->level;
         break;
     case ARMFault_Translation:
         assert(fi->level >= -1 && fi->level <= 3);
@@ -1500,7 +1523,7 @@ typedef struct GetPhysAddrResult {
  * by doing a translation table walk on MMU based systems or using the
  * MPU state on MPU based systems.
  *
- * Returns false if the translation was successful. Otherwise, phys_ptr, attrs,
+ * Returns true if the translation was successful. Otherwise, phys_ptr, attrs,
  * prot and page_size may not be filled in, and the populated fsr value provides
  * information on why the translation aborted, in the format of a
  * DFSR/IFSR fault register, with the following caveats:
@@ -1526,6 +1549,8 @@ bool get_phys_addr(CPUARMState *env, vaddr address,
  *
  * Similar to get_phys_addr, but for use by AccessType_AT, i.e.
  * system instructions for address translation.
+ *
+ * Returns: false on translation failure, true on success.
  */
 bool get_phys_addr_for_at(CPUARMState *env, vaddr address, unsigned prot_check,
                           ARMMMUIdx mmu_idx, ARMSecuritySpace space,
@@ -1758,6 +1783,8 @@ void aarch64_max_tcg_initfn(Object *obj);
 void aarch64_add_pauth_properties(Object *obj);
 void aarch64_add_sve_properties(Object *obj);
 void aarch64_add_sme_properties(Object *obj);
+void aarch64_aa32_a57_init(Object *obj, bool aa32_only);
+void aarch64_host_initfn(Object *obj);
 
 /* Return true if the gdbstub is presenting an AArch64 CPU */
 static inline bool arm_gdbstub_is_aarch64(ARMCPU *cpu)

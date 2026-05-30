@@ -2141,6 +2141,24 @@ GEN_VEXT_VMV_VX(vmv_v_x_h, int16_t, H2)
 GEN_VEXT_VMV_VX(vmv_v_x_w, int32_t, H4)
 GEN_VEXT_VMV_VX(vmv_v_x_d, int64_t, H8)
 
+#define GEN_VEXT_SET_VELEM0(NAME, ETYPE, H)                             \
+void HELPER(NAME)(void *vd, uint64_t s1, CPURISCVState *env,            \
+                  uint32_t desc)                                        \
+{                                                                       \
+    uint32_t esz = sizeof(ETYPE);                                       \
+    uint32_t vlenb = riscv_cpu_cfg(env)->vlenb;                         \
+    uint32_t vta = vext_vta(desc);                                      \
+                                                                        \
+    *((ETYPE *)vd + H(0)) = (ETYPE)s1;                                  \
+    /* Treat every element past vd[0] as tail for scalar-to-vector moves. */ \
+    vext_set_elems_1s(vd, vta, esz, vlenb);                             \
+}
+
+GEN_VEXT_SET_VELEM0(vset_velem0_b, int8_t,  H1)
+GEN_VEXT_SET_VELEM0(vset_velem0_h, int16_t, H2)
+GEN_VEXT_SET_VELEM0(vset_velem0_w, int32_t, H4)
+GEN_VEXT_SET_VELEM0(vset_velem0_d, int64_t, H8)
+
 #define GEN_VEXT_VMERGE_VV(NAME, ETYPE, H)                           \
 void HELPER(NAME)(void *vd, void *v0, void *vs1, void *vs2,          \
                   CPURISCVState *env, uint32_t desc)                 \
@@ -4066,7 +4084,7 @@ static bfloat16 frsqrt7_h_bf16(bfloat16 f, float_status *s)
         (bfloat16_is_infinity(f) && sign) ||
         (bfloat16_is_normal(f) && sign) ||
         (bfloat16_is_zero_or_denormal(f) && !bfloat16_is_zero(f) && sign)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return bfloat16_default_nan(s);
     }
 
@@ -4077,7 +4095,7 @@ static bfloat16 frsqrt7_h_bf16(bfloat16 f, float_status *s)
 
     /* frsqrt7(+-0) = +-inf */
     if (bfloat16_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return bfloat16_set_sign(bfloat16_infinity, sign);
     }
 
@@ -4106,7 +4124,7 @@ static float16 frsqrt7_h(float16 f, float_status *s)
         (float16_is_infinity(f) && sign) ||
         (float16_is_normal(f) && sign) ||
         (float16_is_zero_or_denormal(f) && !float16_is_zero(f) && sign)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return float16_default_nan(s);
     }
 
@@ -4117,7 +4135,7 @@ static float16 frsqrt7_h(float16 f, float_status *s)
 
     /* frsqrt7(+-0) = +-inf */
     if (float16_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return float16_set_sign(float16_infinity, sign);
     }
 
@@ -4146,7 +4164,7 @@ static float32 frsqrt7_s(float32 f, float_status *s)
         (float32_is_infinity(f) && sign) ||
         (float32_is_normal(f) && sign) ||
         (float32_is_zero_or_denormal(f) && !float32_is_zero(f) && sign)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return float32_default_nan(s);
     }
 
@@ -4157,7 +4175,7 @@ static float32 frsqrt7_s(float32 f, float_status *s)
 
     /* frsqrt7(+-0) = +-inf */
     if (float32_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return float32_set_sign(float32_infinity, sign);
     }
 
@@ -4186,7 +4204,7 @@ static float64 frsqrt7_d(float64 f, float_status *s)
         (float64_is_infinity(f) && sign) ||
         (float64_is_normal(f) && sign) ||
         (float64_is_zero_or_denormal(f) && !float64_is_zero(f) && sign)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return float64_default_nan(s);
     }
 
@@ -4197,7 +4215,7 @@ static float64 frsqrt7_d(float64 f, float_status *s)
 
     /* frsqrt7(+-0) = +-inf */
     if (float64_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return float64_set_sign(float64_infinity, sign);
     }
 
@@ -4267,12 +4285,11 @@ static uint64_t frec7(uint64_t f, int exp_size, int frac_size,
              * Overflow to inf or max value of same sign,
              * depending on sign and rounding mode.
              */
-            s->float_exception_flags |= (float_flag_inexact |
-                                         float_flag_overflow);
+            float_raise(float_flag_inexact | float_flag_overflow, s);
 
-            if ((s->float_rounding_mode == float_round_to_zero) ||
-                ((s->float_rounding_mode == float_round_down) && !sign) ||
-                ((s->float_rounding_mode == float_round_up) && sign)) {
+            if ((get_float_rounding_mode(s) == float_round_to_zero) ||
+                ((get_float_rounding_mode(s) == float_round_down) && !sign) ||
+                ((get_float_rounding_mode(s) == float_round_up) && sign)) {
                 /* Return greatest/negative finite value. */
                 return (sign << (exp_size + frac_size)) |
                        (MAKE_64BIT_MASK(frac_size, exp_size) - 1);
@@ -4320,13 +4337,13 @@ static bfloat16 frec7_h_bf16(bfloat16 f, float_status *s)
 
     /* frec7(+-0) = +-inf */
     if (bfloat16_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return bfloat16_set_sign(bfloat16_infinity, sign);
     }
 
     /* frec7(sNaN) = canonical NaN */
     if (bfloat16_is_signaling_nan(f, s)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return bfloat16_default_nan(s);
     }
 
@@ -4352,13 +4369,13 @@ static float16 frec7_h(float16 f, float_status *s)
 
     /* frec7(+-0) = +-inf */
     if (float16_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return float16_set_sign(float16_infinity, sign);
     }
 
     /* frec7(sNaN) = canonical NaN */
     if (float16_is_signaling_nan(f, s)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return float16_default_nan(s);
     }
 
@@ -4384,13 +4401,13 @@ static float32 frec7_s(float32 f, float_status *s)
 
     /* frec7(+-0) = +-inf */
     if (float32_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return float32_set_sign(float32_infinity, sign);
     }
 
     /* frec7(sNaN) = canonical NaN */
     if (float32_is_signaling_nan(f, s)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return float32_default_nan(s);
     }
 
@@ -4416,13 +4433,13 @@ static float64 frec7_d(float64 f, float_status *s)
 
     /* frec7(+-0) = +-inf */
     if (float64_is_zero(f)) {
-        s->float_exception_flags |= float_flag_divbyzero;
+        float_raise(float_flag_divbyzero, s);
         return float64_set_sign(float64_infinity, sign);
     }
 
     /* frec7(sNaN) = canonical NaN */
     if (float64_is_signaling_nan(f, s)) {
-        s->float_exception_flags |= float_flag_invalid;
+        float_raise(float_flag_invalid, s);
         return float64_default_nan(s);
     }
 

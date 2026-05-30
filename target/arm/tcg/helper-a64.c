@@ -273,11 +273,11 @@ uint32_t HELPER(frecpx_f16)(uint32_t a, float_status *fpst)
         float16 nan = a;
         if (float16_is_signaling_nan(a, fpst)) {
             float_raise(float_flag_invalid, fpst);
-            if (!fpst->default_nan_mode) {
+            if (!get_default_nan_mode(fpst)) {
                 nan = float16_silence_nan(a, fpst);
             }
         }
-        if (fpst->default_nan_mode) {
+        if (get_default_nan_mode(fpst)) {
             nan = float16_default_nan(fpst);
         }
         return nan;
@@ -305,11 +305,11 @@ float32 HELPER(frecpx_f32)(float32 a, float_status *fpst)
         float32 nan = a;
         if (float32_is_signaling_nan(a, fpst)) {
             float_raise(float_flag_invalid, fpst);
-            if (!fpst->default_nan_mode) {
+            if (!get_default_nan_mode(fpst)) {
                 nan = float32_silence_nan(a, fpst);
             }
         }
-        if (fpst->default_nan_mode) {
+        if (get_default_nan_mode(fpst)) {
             nan = float32_default_nan(fpst);
         }
         return nan;
@@ -337,11 +337,11 @@ float64 HELPER(frecpx_f64)(float64 a, float_status *fpst)
         float64 nan = a;
         if (float64_is_signaling_nan(a, fpst)) {
             float_raise(float_flag_invalid, fpst);
-            if (!fpst->default_nan_mode) {
+            if (!get_default_nan_mode(fpst)) {
                 nan = float64_silence_nan(a, fpst);
             }
         }
-        if (fpst->default_nan_mode) {
+        if (get_default_nan_mode(fpst)) {
             nan = float64_default_nan(fpst);
         }
         return nan;
@@ -835,8 +835,8 @@ void HELPER(dc_zva)(CPUARMState *env, uint64_t vaddr_in)
     clear_helper_retaddr();
 }
 
-void HELPER(unaligned_access)(CPUARMState *env, uint64_t addr,
-                              uint32_t access_type, uint32_t mmu_idx)
+void HELPER(arm_unaligned_access)(CPUARMState *env, uint64_t addr,
+                                  uint32_t access_type, uint32_t mmu_idx)
 {
     arm_cpu_do_unaligned_access(env_cpu(env), addr, access_type,
                                 mmu_idx, GETPC());

@@ -1634,6 +1634,8 @@ static void qemu_unlink_pidfile(Notifier *n, void *data)
 
     upn = DO_UPCAST(struct UnlinkPidfileNotifier, notifier, n);
     unlink(upn->pid_file_realpath);
+    g_free(upn->pid_file_realpath);
+    upn->pid_file_realpath = NULL;
 }
 
 static const QEMUOption *lookup_opt(int argc, char **argv,
@@ -2010,7 +2012,8 @@ static bool object_create_early(const char *type)
 
 static void qemu_apply_machine_options(QDict *qdict)
 {
-    object_set_properties_from_keyval(OBJECT(current_machine), qdict, false, &error_fatal);
+    object_set_props_from_keyval(OBJECT(current_machine), qdict,
+                                 false, &error_fatal);
 
     if (semihosting_enabled(false) && !semihosting_get_argc()) {
         /* fall back to the -kernel/-append */
@@ -2225,8 +2228,8 @@ static void qemu_create_machine(QDict *qdict)
             keyval_parse(machine_class->default_machine_opts, NULL, NULL,
                          &error_abort);
         qemu_apply_legacy_machine_options(default_opts);
-        object_set_properties_from_keyval(OBJECT(current_machine), default_opts,
-                                          false, &error_abort);
+        object_set_props_from_keyval(OBJECT(current_machine), default_opts,
+                                     false, &error_abort);
         qobject_unref(default_opts);
     }
 }
@@ -2671,6 +2674,7 @@ static void qemu_maybe_daemonize(const char *pid_file)
                 warn_report("not removing PID file on exit: cannot resolve PID "
                             "file path: %s: %s", pid_file, strerror(errno));
             }
+            g_free(pid_file_realpath);
             return;
         }
 
